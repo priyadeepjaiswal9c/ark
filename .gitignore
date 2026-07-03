@@ -1,0 +1,11 @@
+# ARK build artifacts
+ark/.venv/
+ark/demo-vault/
+ark/sample-dump/
+ark-vault/
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.build.log
+.DS_Store

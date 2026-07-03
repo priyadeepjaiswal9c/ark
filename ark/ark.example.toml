@@ -1,0 +1,53 @@
+# ARK vault configuration.
+# Non-destructive by default: ARK only reads sources and copies into the vault.
+
+[backup]
+kind = "local"   # local | external | nas | cloud
+# Where the vault physically lives. Point this at an external SSD or NAS mount
+# to keep the backup off this machine; the pipeline is unchanged.
+path = '~/ARK-vault'
+
+[options]
+link_mode = "hardlink"   # hardlink | symlink | copy
+fallback_to = 'Unsorted/{kind}/{taken_at.year}/{taken_at.month:02}'
+review_to = '_NeedsReview/{kind}'
+
+# Parametric organization rules — evaluated top-to-bottom; first match wins.
+# `when` is a safe expression over asset fields (kind, place.city, taken_at.year, ...).
+# `to` is a path template; {place.city}, {taken_at.year:04}, {vendor} etc.
+
+[[rules]]
+name = 'goa-winter-trips'
+when = 'kind == "image" and place.admin == "Goa" and taken_at.month in (11, 12, 1)'
+to = 'Trips/Goa-{taken_at.year}'
+tags = ['trip', 'goa']
+
+[[rules]]
+name = 'photos-by-place'
+when = 'kind == "image" and has_location and has_reliable_date'
+to = 'Photos/{place.country}/{place.city}/{taken_at.year}'
+tags = ['photo']
+
+[[rules]]
+name = 'photos-by-date'
+when = 'kind == "image" and has_reliable_date'
+to = 'Photos/{taken_at.year}/{taken_at.month:02}'
+tags = ['photo']
+
+[[rules]]
+name = 'invoices'
+when = 'kind == "document" and "invoice" in filename.lower()'
+to = 'Documents/Invoices/{taken_at.year}'
+tags = ['invoice']
+
+[[rules]]
+name = 'documents'
+when = 'kind == "document" and has_reliable_date'
+to = 'Documents/{taken_at.year}'
+tags = ['document']
+
+[[rules]]
+name = 'videos'
+when = 'kind == "video" and has_reliable_date'
+to = 'Videos/{taken_at.year}/{taken_at.month:02}'
+tags = ['video']
