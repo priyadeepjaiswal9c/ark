@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .constants import DIR_OBJECTS, DIR_ORGANIZED
+from .constants import DIR_OBJECTS, DIR_ORGANIZED, DIR_QUARANTINE
 from .hashing import hash_file, verify_copy
 from .models import Asset
 from .rules import RuleMatch
@@ -60,9 +60,15 @@ class VaultWriter:
         self.cfg = cfg
         self.objects = self.vault / DIR_OBJECTS
         self.organized = self.vault / DIR_ORGANIZED
+        self.quarantine = self.vault / DIR_QUARANTINE
 
     # ---- public API -------------------------------------------------------
-    def store(self, asset: Asset, match: RuleMatch, dry_run: bool = False) -> StoreResult:
+    def store(self, asset: Asset, match: RuleMatch, dry_run: bool = False,
+              skip_organize: bool = False) -> StoreResult:
+        """Back up ``asset`` into the vault. When ``skip_organize`` is set the
+        object is still stored/verified but no ``organized/`` link is created —
+        used on rescan for assets whose organized entry is in quarantine, so a
+        scan never silently un-quarantines them."""
         h = asset.hash
         obj_abs = self._object_path(asset)
         obj_rel = str(obj_abs.relative_to(self.vault))
@@ -112,11 +118,14 @@ class VaultWriter:
         # link failure must NOT discard it. Report success (the object is good
         # and will be registered) but flag the organize gap; a later scan fills it.
         organize_error = ""
-        try:
-            self._link_into_organized(obj_abs, organized_abs)
-        except OSError as e:
-            organize_error = f"backed up OK, but organizing failed: {e}"
-            organized_rel = ""
+        if skip_organize:
+            organized_rel = ""      # asset is quarantined — leave organized/ untouched
+        else:
+            try:
+                self._link_into_organized(obj_abs, organized_abs)
+            except OSError as e:
+                organize_error = f"backed up OK, but organizing failed: {e}"
+                organized_rel = ""
 
         return StoreResult(
             hash=h, object_relpath=obj_rel, is_new_object=(action != "duplicate"),
@@ -143,10 +152,10 @@ class VaultWriter:
             return False
 
     def verify_vault(self) -> list[dict]:
-        """Re-hash every object AND every organized entry; report anything that
-        doesn't prove out. Read-only.
+        """Re-hash every object AND every linked view (organized/ and
+        quarantine/); report anything that doesn't prove out. Read-only.
 
-        Each problem is ``{"path": <rel>, "problem": <str>}``. Organized entries
+        Each problem is ``{"path": <rel>, "problem": <str>}``. Linked entries
         that are hardlinks to an already-verified object are skipped (same
         inode, same bytes) — so the common case only pays one hash per object.
         """
@@ -173,8 +182,10 @@ class VaultWriter:
                     problems.append({"path": str(obj.relative_to(self.vault)),
                                      "problem": "object does not match its content address"})
 
-        if self.organized.exists():
-            for f in self.organized.rglob("*"):
+        for tree in (self.organized, self.quarantine):
+            if not tree.exists():
+                continue
+            for f in tree.rglob("*"):
                 if not f.is_file():
                     continue
                 try:
@@ -185,7 +196,7 @@ class VaultWriter:
                     continue  # hardlink to a verified object — already proven
                 if hash_file(f) not in object_hashes:
                     problems.append({"path": str(f.relative_to(self.vault)),
-                                     "problem": "organized entry not backed by any vault object"})
+                                     "problem": f"{tree.name} entry not backed by any vault object"})
         return problems
 
     # ---- internals --------------------------------------------------------

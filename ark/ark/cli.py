@@ -7,6 +7,7 @@ Commands:
   ark search  QUERY... [--vault DIR] [--limit N] natural-language-ish search
   ark cleanup [--vault DIR]                       safe-to-delete-from-phone report
   ark similar [--vault DIR] [--distance N]        near-duplicate + blurry-photo report
+  ark quarantine ACTION [BATCH] [--dry-run]       reversibly declutter (near-duplicates/blurry/…) + undo
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
 """
@@ -30,7 +31,7 @@ from .db import Database
 from .backup import VaultWriter
 from . import (
     pipeline, report, rules as rules_mod, search as search_mod,
-    similar as similar_mod,
+    similar as similar_mod, quarantine as quarantine_mod,
 )
 
 
@@ -75,6 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
     psi.add_argument("--blur-threshold", type=float, default=None,
                      help="Laplacian-variance below which a photo is 'blurry' (default 60)")
 
+    pq = sub.add_parser(
+        "quarantine",
+        help="reversibly move redundant/blurry organized entries into quarantine/ (with undo)")
+    _vault_arg(pq)
+    pq.add_argument("action", choices=["duplicates", "near-duplicates", "blurry", "list", "undo"],
+                    help="what to quarantine, or 'list' / 'undo'")
+    pq.add_argument("batch", nargs="?", help="batch id for `undo` (or 'all')")
+    pq.add_argument("--dry-run", action="store_true", help="preview only — move nothing")
+    pq.add_argument("--distance", type=int, default=None, help="near-duplicate Hamming distance")
+    pq.add_argument("--blur-threshold", type=float, default=None, help="blur variance threshold")
+
     pr = sub.add_parser("rules", help="show/validate organization rules")
     _vault_arg(pr)
     pr.add_argument("--validate", action="store_true")
@@ -112,6 +124,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_cleanup(args)
     if args.cmd == "similar":
         return cmd_similar(args)
+    if args.cmd == "quarantine":
+        return cmd_quarantine(args)
     if args.cmd == "rules":
         return cmd_rules(args)
     if args.cmd == "verify":
@@ -346,6 +360,96 @@ def cmd_similar(args: argparse.Namespace) -> int:
     print("\n" + rep.summary())
     print("Nothing was changed. To reversibly declutter (with full undo):")
     print("  ark quarantine near-duplicates      ark quarantine blurry")
+    return 0
+
+
+def cmd_quarantine(args: argparse.Namespace) -> int:
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault}")
+        return 1
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        if args.action == "list":
+            return _quarantine_list(db, args)
+        if args.action == "undo":
+            return _quarantine_undo(db, vault, args)
+        return _quarantine_add(db, vault, args)
+
+
+def _quarantine_add(db: Database, vault: Path, args: argparse.Namespace) -> int:
+    plan = quarantine_mod.plan(db, vault, args.action,
+                               distance=args.distance, blur_threshold=args.blur_threshold)
+    res = quarantine_mod.apply(db, vault, plan, dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps({
+            "action": args.action, "dry_run": args.dry_run, "batch": res.batch,
+            "moved": [{"path": c.display, "source": c.source_path, "size": c.size} for c in res.moved],
+            "reclaimable_bytes": res.reclaimable_bytes,
+            "skipped": [{"path": p, "why": w} for p, w in res.skipped],
+        }, indent=2))
+        return 0
+    verb = "would quarantine" if args.dry_run else "quarantined"
+    if not res.moved:
+        print(f"nothing to quarantine for '{args.action}'.")
+        if res.skipped:
+            for p, w in _cap(res.skipped, 20):
+                print(f"    · skipped {p}  ({w})")
+        return 0
+    print(f"🗄  {verb} {len(res.moved)} entr{'y' if len(res.moved) == 1 else 'ies'} "
+          f"({report._human(res.reclaimable_bytes)}) — reason: {args.action}")
+    if not args.dry_run:
+        print(f"   batch: {res.batch}")
+    for c in _cap(res.moved, 30):
+        print(f"    → {report._human(c.size):>9}  {c.display}")
+    if len(res.moved) > 30:
+        print(f"    … and {len(res.moved) - 30} more")
+    for p, w in res.skipped:
+        print(f"    · skipped {p}  ({w})")
+    print("\nNo bytes were deleted — the objects and your sources are untouched.")
+    if args.dry_run:
+        print(f"Re-run without --dry-run to move them into quarantine/.")
+    else:
+        print(f"Undo anytime:  ark quarantine undo {res.batch}    (or: ark quarantine undo all)")
+    return 0
+
+
+def _quarantine_list(db: Database, args: argparse.Namespace) -> int:
+    batches = db.quarantine_batches()
+    if args.json:
+        print(json.dumps([{"batch": b["batch"], "reason": b["reason"],
+                           "active": b["active"], "at": b["at"]} for b in batches], indent=2))
+        return 0
+    if not batches:
+        print("no active quarantine batches. (Everything is in organized/.)")
+        return 0
+    print(f"active quarantine batches ({len(batches)}):\n")
+    for b in batches:
+        print(f"  {b['batch']}   {b['reason']:15}  {b['active']} item(s)   {(b['at'] or '')[:19]}")
+    print("\nRestore one:  ark quarantine undo <batch>     Restore all:  ark quarantine undo all")
+    return 0
+
+
+def _quarantine_undo(db: Database, vault: Path, args: argparse.Namespace) -> int:
+    if not args.batch:
+        _err("undo needs a batch id (or 'all'). See `ark quarantine list`.")
+        return 1
+    results = quarantine_mod.undo(db, vault, args.batch)
+    total = sum(len(r.restored) + len(r.relocated) for r in results.values())
+    touched = total + sum(len(r.missing) for r in results.values())
+    if args.json:
+        print(json.dumps({b: {"restored": r.restored, "relocated": r.relocated,
+                              "missing": r.missing} for b, r in results.items()}, indent=2))
+        return 0
+    if touched == 0:
+        print(f"no active quarantine batch matching '{args.batch}'. See `ark quarantine list`.")
+        return 0
+    for b, r in results.items():
+        print(f"↩  restored batch {b}: {len(r.restored)} back in place"
+              + (f", {len(r.relocated)} relocated (original spot was taken)" if r.relocated else "")
+              + (f", {len(r.missing)} missing" if r.missing else ""))
+        for want, actual in r.relocated:
+            print(f"    ~ {want}  →  {actual}")
+    print(f"\n{total} entr{'y' if total == 1 else 'ies'} returned to organized/.")
     return 0
 
 

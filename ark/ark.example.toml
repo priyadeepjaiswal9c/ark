@@ -11,6 +11,9 @@ path = '~/ARK-vault'
 link_mode = "hardlink"   # hardlink | symlink | copy
 fallback_to = 'Unsorted/{kind}/{taken_at.year}/{taken_at.month:02}'
 review_to = '_NeedsReview/{kind}'
+# Perceptual thresholds for `ark similar` / `ark quarantine`.
+near_dup_distance = 10   # dHash Hamming distance <= this counts as "the same picture"
+blur_threshold = 60.0    # Laplacian variance below this flags a photo as "likely blurry"
 
 # Parametric organization rules — evaluated top-to-bottom; first match wins.
 # `when` is a safe expression over asset fields (kind, place.city, taken_at.year, ...).

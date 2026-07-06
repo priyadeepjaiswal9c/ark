@@ -320,6 +320,43 @@ class Database:
     def objects_for_verify(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT hash,object_path,size FROM objects").fetchall()
 
+    # ---- quarantine (reversible declutter) --------------------------------
+    def add_quarantine_entry(self, batch: str, asset_id: Optional[int], source_path: str,
+                             h: str, reason: str, original_relpath: str,
+                             quarantine_relpath: str, now: str) -> None:
+        self.conn.execute(
+            """INSERT INTO quarantine(batch,asset_id,source_path,hash,reason,
+                    original_relpath,quarantine_relpath,quarantined_at,restored_at)
+               VALUES(?,?,?,?,?,?,?,?,NULL)""",
+            (batch, asset_id, source_path, h, reason, original_relpath, quarantine_relpath, now),
+        )
+
+    def active_quarantine_sources(self) -> set[str]:
+        """Source paths whose organized/ entry is currently in quarantine — the
+        pipeline must not re-materialize their organized link on rescan."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT source_path FROM quarantine WHERE restored_at IS NULL")}
+
+    def quarantine_batches(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT batch, reason, COUNT(*) AS n, MIN(quarantined_at) AS at,
+                      SUM(CASE WHEN restored_at IS NULL THEN 1 ELSE 0 END) AS active
+               FROM quarantine
+               GROUP BY batch
+               HAVING active > 0
+               ORDER BY at DESC"""
+        ).fetchall()
+
+    def quarantine_entries(self, batch: str, active_only: bool = True) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM quarantine WHERE batch=?"
+        if active_only:
+            sql += " AND restored_at IS NULL"
+        return self.conn.execute(sql + " ORDER BY id", (batch,)).fetchall()
+
+    def mark_quarantine_restored(self, entry_id: int, now: str) -> None:
+        self.conn.execute(
+            "UPDATE quarantine SET restored_at=? WHERE id=?", (now, entry_id))
+
 
 # ---- module helpers --------------------------------------------------------
 

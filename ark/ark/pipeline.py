@@ -105,10 +105,12 @@ def run(
     now = _now()
     run_id = db.start_run(stats.source, stats.mode, now) if not dry_run else -1
     seen: set[str] = set()
+    # Sources whose organized/ link is in quarantine — never re-materialize it.
+    quarantined = db.active_quarantine_sources()
 
     try:
         for i, path in enumerate(ingest(source), 1):
-            item = _process_one(path, cfg, db, writer, seen, dry_run)
+            item = _process_one(path, cfg, db, writer, seen, dry_run, quarantined)
             _tally(stats, item)
             if progress:
                 progress(item)
@@ -124,7 +126,7 @@ def run(
 
 
 def _process_one(path: Path, cfg: Config, db: Database, writer: VaultWriter,
-                 seen: set[str], dry_run: bool) -> ItemResult:
+                 seen: set[str], dry_run: bool, quarantined: set[str]) -> ItemResult:
     # One bad file — corrupt bytes, a rule that raises, a transient DB error —
     # must NEVER abort the whole scan. The entire per-file body is guarded.
     try:
@@ -140,8 +142,11 @@ def _process_one(path: Path, cfg: Config, db: Database, writer: VaultWriter,
         existing = db.get_asset_by_source(asset.source_path)
         is_rescan = existing is not None and existing["hash"] == asset.hash
         in_run_dup = asset.hash in seen  # identical content already stored earlier this run
+        # If this source's organized entry is currently quarantined, keep it that
+        # way: back the object up but don't recreate the organized/ link.
+        is_quarantined = asset.source_path in quarantined
 
-        result = writer.store(asset, match, dry_run=dry_run)
+        result = writer.store(asset, match, dry_run=dry_run, skip_organize=is_quarantined)
 
         unchanged = healed = False
         wrote_bytes = result.action in ("stored", "healed")  # store actually copied bytes
@@ -162,7 +167,13 @@ def _process_one(path: Path, cfg: Config, db: Database, writer: VaultWriter,
             asset.status = STATUS_NEEDS_REVIEW
         else:
             asset.status = STATUS_STORED
-        asset.organized_path = result.organized_relpath or match.dest_relpath
+        if is_quarantined:
+            # Physically it lives in quarantine/ now; keep the record pointing at
+            # where it belongs (and where `undo` restores it), not the fallback dir.
+            asset.organized_path = (existing["organized_path"] if existing else None) \
+                or result.organized_relpath or match.dest_relpath
+        else:
+            asset.organized_path = result.organized_relpath or match.dest_relpath
 
         if not dry_run and result.action != "failed":
             now = _now()
