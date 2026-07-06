@@ -7,6 +7,7 @@ Commands:
   ark search  QUERY... [--vault DIR] [--limit N] natural-language-ish search
   ark cleanup [--vault DIR]                       safe-to-delete-from-phone report
   ark similar [--vault DIR] [--distance N]        near-duplicate + blurry-photo report
+  ark insights [--vault DIR]                       reasoning: precious-vs-junk, missing-backup, per-device
   ark quarantine ACTION [BATCH] [--dry-run]       reversibly declutter (near-duplicates/blurry/…) + undo
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
@@ -33,6 +34,7 @@ from .backup import VaultWriter
 from . import (
     pipeline, report, rules as rules_mod, search as search_mod,
     similar as similar_mod, quarantine as quarantine_mod, watch as watch_mod,
+    insights as insights_mod,
 )
 
 
@@ -69,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     pc = sub.add_parser("cleanup", help="safe-to-delete-from-phone report")
     _vault_arg(pc)
+
+    pin = sub.add_parser("insights", help="reasoning: precious-vs-junk, missing-backup, per-device coverage")
+    _vault_arg(pin)
+    pin.add_argument("--limit", type=int, default=15, help="max items per section")
 
     psi = sub.add_parser("similar", help="find near-duplicate and blurry photos")
     _vault_arg(psi)
@@ -132,6 +138,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_cleanup(args)
     if args.cmd == "similar":
         return cmd_similar(args)
+    if args.cmd == "insights":
+        return cmd_insights(args)
     if args.cmd == "quarantine":
         return cmd_quarantine(args)
     if args.cmd == "rules":
@@ -370,6 +378,56 @@ def cmd_similar(args: argparse.Namespace) -> int:
     print("\n" + rep.summary())
     print("Nothing was changed. To reversibly declutter (with full undo):")
     print("  ark quarantine near-duplicates      ark quarantine blurry")
+    return 0
+
+
+def cmd_insights(args: argparse.Namespace) -> int:
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault}")
+        return 1
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        rep = insights_mod.analyze_vault(db, vault)
+
+    if args.json:
+        print(json.dumps({
+            "summary": rep.summary(), "buckets": rep.buckets,
+            "junk": [{"path": k.display, "score": k.score, "reasons": k.reasons} for k in rep.junk],
+            "precious_single_copy": [{"path": k.display, "score": k.score} for k in rep.precious_single_copy],
+            "devices": [{"device": d.device, "count": d.count, "first": d.first, "last": d.last,
+                         "largest_gap_days": d.largest_gap_days, "gap_between": d.gap_between}
+                        for d in rep.devices],
+        }, indent=2))
+        return 0
+
+    b = rep.buckets
+    print("🧠 ARK insights — reasoning over your vault (advisory; nothing is changed)\n")
+    print(f"  keep-score buckets:  {b[insights_mod.PRECIOUS]} precious · "
+          f"{b[insights_mod.NORMAL]} normal · {b[insights_mod.JUNK]} likely junk\n")
+
+    if rep.precious_single_copy:
+        print(f"  ⭐ precious, but only ONE copy exists — mirror these off-site "
+              f"({len(rep.precious_single_copy)}):")
+        for k in _cap(rep.precious_single_copy, args.limit):
+            print(f"      {k.score:3}  {k.display}")
+        print()
+    if rep.junk:
+        print(f"  🗑  likely junk — review, then maybe `ark quarantine` ({len(rep.junk)}):")
+        for k in _cap(rep.junk, args.limit):
+            why = "; ".join(r for r in k.reasons if r.startswith("-")) or "low signal"
+            print(f"      {k.score:3}  {k.display}")
+            print(f"           ↳ {why}")
+        print()
+    if rep.devices:
+        print("  📷 per-device coverage (gaps hint at un-backed-up stretches):")
+        for d in rep.devices:
+            gap = ""
+            if d.largest_gap_days >= insights_mod._GAP_ALERT_DAYS and d.gap_between:
+                gap = f"  ⚠ {d.largest_gap_days}-day gap {d.gap_between[0]}→{d.gap_between[1]}"
+            span = f"{d.first or '?'} … {d.last or '?'}"
+            print(f"      {d.count:4}  {d.device:24}  {span}{gap}")
+        print()
+    print(rep.summary())
     return 0
 
 

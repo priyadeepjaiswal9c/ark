@@ -55,6 +55,8 @@ $PY -m ark verify                    # re-hash every object (integrity)
 | `ark search QUERY` | Natural-language-ish search: free text + filters (`kind:`, `place:`, `year:`, `camera:`). |
 | `ark cleanup` | The safe-to-delete-from-phone report — duplicates proven already in the vault. Suggests, never deletes. |
 | `ark similar [--distance N] [--blur-threshold X]` | Find **near-duplicate** photos (visually the same shot, different bytes) and **blurry** ones. Read-only; suggests a keeper per group. |
+| `ark insights` | Reasoning layer: a transparent **keep-score** (precious/normal/junk, every point justified), **missing-backup** (precious single-copy items to mirror), and **per-device** coverage + capture gaps. Read-only. |
+| `ark watch [--once] [--dry-run]` | **Auto-ingest on connect** — scans a volume the moment it mounts (`/Volumes`), matched against a config allowlist. Non-destructive; a reconnected card is re-scanned (dedup makes it cheap). |
 | `ark quarantine {near-duplicates,blurry,duplicates,list,undo}` | Reversibly move redundant/blurry **organized-view links** into `quarantine/` with an undo manifest. Objects and sources are never touched; `undo` restores everything. `--dry-run` previews. |
 | `ark status` | Vault stats: assets, distinct objects, bytes saved by dedup, per-kind. |
 | `ark rules [--validate]` | Show / validate the organization rules. |
@@ -161,6 +163,8 @@ stickiness, exact undo).
 - **P1 (done)** — vault core: extract + enrich + organize + versioned safe backup.
 - **P2 (done)** — NL search, hash dedup, cleanup intelligence, **near-duplicate +
   blur detection** (`ark similar`) and **reversible quarantine** (`ark quarantine`).
-- **P3** — auto-ingest on device/SSD mount (FSEvents watchers).
-- **P4** — companion apps (Android background sync; iOS 26.1 photo extension).
-- **P5** — reasoning layer: precious-vs-junk, near-dup/blur, missing-backup, cross-device.
+- **P3 (done)** — auto-ingest on device/SSD mount (`ark watch`; stdlib polling, FSEvents-ready).
+- **P4** — companion apps (Android background sync; iOS 26.1 photo extension). *Needs mobile toolchains/
+  devices — the vault + CLI are the stable contract they target.*
+- **P5 (done)** — reasoning layer (`ark insights`): precious-vs-junk keep-score, missing-backup
+  (single-copy), cross-device coverage + capture-gap detection.
