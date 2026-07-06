@@ -58,6 +58,7 @@ $PY -m ark verify                    # re-hash every object (integrity)
 | `ark insights` | Reasoning layer: a transparent **keep-score** (precious/normal/junk, every point justified), **missing-backup** (precious single-copy items to mirror), and **per-device** coverage + capture gaps. Read-only. |
 | `ark watch [--once] [--dry-run]` | **Auto-ingest on connect** — scans a volume the moment it mounts (`/Volumes`), matched against a config allowlist. Non-destructive; a reconnected card is re-scanned (dedup makes it cheap). |
 | `ark mirror [--verify]` | Replicate the object store to the `[backup]` target (an external SSD / NAS), atomically + hash-verified, so your vault survives losing either disk. Set `[backup] path` to somewhere other than the vault to enable; scans then mirror new objects automatically. |
+| `ark serve [--host H] [--port N]` | **Phone companion.** Runs a tiny sync receiver + an installable web app (PWA) — open the printed URL on your phone (same Wi-Fi), pick photos, and they upload straight into the vault (non-destructive, deduped, organized). Token-authed. Works on Android and iOS via the browser — no app store. |
 | `ark quarantine {near-duplicates,blurry,duplicates,list,undo}` | Reversibly move redundant/blurry **organized-view links** into `quarantine/` with an undo manifest. Objects and sources are never touched; `undo` restores everything. `--dry-run` previews. |
 | `ark status` | Vault stats: assets, distinct objects, bytes saved by dedup, per-kind. |
 | `ark rules [--validate]` | Show / validate the organization rules. |
@@ -165,7 +166,8 @@ stickiness, exact undo).
 - **P2 (done)** — NL search, hash dedup, cleanup intelligence, **near-duplicate +
   blur detection** (`ark similar`) and **reversible quarantine** (`ark quarantine`).
 - **P3 (done)** — auto-ingest on device/SSD mount (`ark watch`; stdlib polling, FSEvents-ready).
-- **P4** — companion apps (Android background sync; iOS 26.1 photo extension). *Needs mobile toolchains/
-  devices — the vault + CLI are the stable contract they target.*
+- **P4 (web companion done)** — `ark serve` runs a phone sync receiver + installable PWA that works on
+  Android and iOS through the browser (no app store). Native background-sync apps remain optional and
+  need mobile toolchains; they'd target the same HTTP contract.
 - **P5 (done)** — reasoning layer (`ark insights`): precious-vs-junk keep-score, missing-backup
   (single-copy), cross-device coverage + capture-gap detection.

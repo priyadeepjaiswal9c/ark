@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>ARK — send to vault</title>
+<style>
+  :root { --bg:#0e1116; --card:#171b22; --line:#262c36; --fg:#e7ecf3; --dim:#8b97a7;
+          --ok:#3fb950; --dup:#d29922; --err:#f85149; --accent:#4c8dff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { padding:22px 18px 10px; }
+  h1 { font-size:20px; margin:0; letter-spacing:.3px; }
+  h1 b { color:var(--accent); }
+  .sub { color:var(--dim); font-size:13px; margin-top:2px; }
+  main { padding:12px 18px 90px; max-width:640px; margin:0 auto; }
+  .drop { border:1.5px dashed var(--line); border-radius:16px; background:var(--card);
+          padding:34px 18px; text-align:center; color:var(--dim); }
+  .drop strong { color:var(--fg); display:block; font-size:17px; margin-bottom:4px; }
+  .pick { display:inline-block; margin-top:16px; background:var(--accent); color:#fff;
+          font-weight:600; padding:13px 22px; border-radius:12px; cursor:pointer; }
+  input[type=file]{ display:none; }
+  .stat { display:flex; gap:16px; color:var(--dim); font-size:13px; margin:16px 2px 4px; }
+  .stat b { color:var(--fg); }
+  ul { list-style:none; padding:0; margin:14px 0 0; }
+  li { display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--line);
+       border-radius:10px; padding:10px 12px; margin-bottom:8px; font-size:14px; }
+  li .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  li .badge { font-size:12px; font-weight:600; padding:2px 8px; border-radius:20px; }
+  .b-stored{ background:rgba(63,185,80,.15); color:var(--ok);}
+  .b-duplicate{ background:rgba(210,153,34,.15); color:var(--dup);}
+  .b-uploading{ background:rgba(76,141,255,.15); color:var(--accent);}
+  .b-failed{ background:rgba(248,81,73,.15); color:var(--err);}
+  .where { color:var(--dim); font-size:12px; }
+  .banner { background:rgba(248,81,73,.12); color:var(--err); border:1px solid rgba(248,81,73,.3);
+            padding:12px 14px; border-radius:10px; margin-bottom:14px; font-size:14px; display:none; }
+  footer { position:fixed; bottom:0; left:0; right:0; text-align:center; padding:10px;
+           color:var(--dim); font-size:12px; background:linear-gradient(transparent,var(--bg) 40%); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Send to <b>ARK</b></h1>
+  <div class="sub" id="sub">your non-destructive vault</div>
+</header>
+<main>
+  <div class="banner" id="banner"></div>
+  <div class="drop" id="drop">
+    <strong>Back up your photos</strong>
+    Pick photos or videos — each is copied into your vault, deduplicated and
+    organized. Originals on your phone are never touched.
+    <label class="pick">Choose photos
+      <input type="file" id="file" multiple accept="image/*,video/*">
+    </label>
+  </div>
+  <div class="stat"><span>sent this session: <b id="n">0</b></span>
+    <span>vault: <b id="assets">–</b> items, <b id="objects">–</b> unique</span></div>
+  <ul id="list"></ul>
+</main>
+<footer>ARK · nothing here deletes anything</footer>
+<script>
+const $ = s => document.querySelector(s);
+// token: from ?t= on first open, then remembered so the installed app keeps working.
+const url = new URL(location.href);
+let token = url.searchParams.get('t');
+if (token) localStorage.setItem('ark_token', token);
+token = token || localStorage.getItem('ark_token') || '';
+let sent = 0;
+
+function banner(msg){ const b=$('#banner'); b.textContent=msg; b.style.display='block'; }
+
+async function refreshStatus(){
+  try{
+    const r = await fetch('/status', {headers:{'X-ARK-Token':token}});
+    if(r.status===401){ banner('This link is missing its access token. Re-open the URL that `ark serve` printed.'); return; }
+    const s = await r.json();
+    $('#assets').textContent = s.assets; $('#objects').textContent = s.objects;
+  }catch(e){ /* offline — ignore */ }
+}
+
+function row(file){
+  const li=document.createElement('li');
+  li.innerHTML=`<span class="name"></span><span class="badge b-uploading">uploading…</span>`;
+  li.querySelector('.name').textContent=file.name;
+  $('#list').prepend(li);
+  return li;
+}
+function done(li, res){
+  const badge=li.querySelector('.badge');
+  if(!res.ok){ badge.className='badge b-failed'; badge.textContent='failed';
+    if(res.error){ const w=document.createElement('div'); } return; }
+  const st=res.status;
+  badge.className='badge b-'+(st==='duplicate'?'duplicate':'stored');
+  badge.textContent = st==='duplicate' ? 'already had it' : 'backed up';
+  if(res.organized_path){
+    const w=document.createElement('div'); w.className='where';
+    w.textContent=res.organized_path.replace(/^organized\//,'→ ');
+    li.appendChild(w);
+  }
+  $('#n').textContent = ++sent;
+}
+
+async function upload(file){
+  const li=row(file);
+  try{
+    const r=await fetch('/ingest',{method:'POST',
+      headers:{'X-ARK-Token':token,'X-Filename':file.name},
+      body:file});
+    done(li, await r.json());
+  }catch(e){ done(li,{ok:false,error:String(e)}); }
+  refreshStatus();
+}
+
+$('#file').addEventListener('change', e=>{
+  [...e.target.files].forEach(upload);
+  e.target.value='';
+});
+// drag & drop (desktop)
+const drop=$('#drop');
+['dragover','drop'].forEach(ev=>drop.addEventListener(ev,e=>e.preventDefault()));
+drop.addEventListener('drop', e=>[...e.dataTransfer.files].forEach(upload));
+
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+if(!token) banner('Open the URL that `ark serve` printed (it carries your access token).');
+refreshStatus();
+</script>
+</body>
+</html>

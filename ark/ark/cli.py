@@ -13,6 +13,7 @@ Commands:
   ark verify  [--vault DIR]                        re-hash every object (integrity)
   ark mirror  [--vault DIR] [--verify]             replicate the store to the off-site [backup] target
   ark watch   [--vault DIR] [--once] [--dry-run]   auto-ingest volumes as they connect
+  ark serve   [--vault DIR] [--host H] [--port N]  phone sync receiver + web companion app
 """
 
 from __future__ import annotations
@@ -113,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--interval", type=float, default=None, help="seconds between mount-root polls")
     pw.add_argument("--mount-root", default=None, help="where volumes mount (default: config / /Volumes)")
     pw.add_argument("--dry-run", action="store_true", help="preview scans — writes nothing")
+
+    psv = sub.add_parser("serve", help="run the phone sync receiver + web companion app")
+    _vault_arg(psv)
+    psv.add_argument("--host", default="127.0.0.1", help="bind address (use 0.0.0.0 to reach from your phone)")
+    psv.add_argument("--port", type=int, default=7777, help="port (default 7777)")
+    psv.add_argument("--token", default=None, help="access token (default: a fresh random one)")
     return p
 
 
@@ -156,6 +163,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_mirror(args)
     if args.cmd == "watch":
         return cmd_watch(args)
+    if args.cmd == "serve":
+        return cmd_serve(args)
     return 2
 
 
@@ -627,6 +636,36 @@ def cmd_mirror(args: argparse.Namespace) -> int:
             print("    (mirror target not reachable — reconnect the drive/NAS and re-run)")
         return 1
     print(f"    ✓ {len(objs)} objects are now in two places.")
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from . import serve as serve_mod
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault} — run `ark init --vault {vault}` first")
+        return 1
+    cfg = load_config(vault)
+    try:
+        server = serve_mod.make_server(vault, cfg, args.host, args.port, token=args.token)
+    except OSError as e:
+        _err(f"could not bind {args.host}:{args.port} — {e}")
+        return 1
+    port = server.server_address[1]
+    shown_host = serve_mod.lan_ip() if args.host in ("0.0.0.0", "") else args.host
+    url = f"http://{shown_host}:{port}/?t={server.token}"
+    print("📡  ARK sync server — the web companion for your phone")
+    print(f"    vault : {vault}")
+    print(f"    open on your phone (same Wi-Fi):  {url}")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("    (bound to localhost; add --host 0.0.0.0 to reach it from your phone)")
+    print("    uploads are ingested non-destructively; Ctrl-C to stop.\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.", file=sys.stderr)
+    finally:
+        server.server_close()
     return 0
 
 

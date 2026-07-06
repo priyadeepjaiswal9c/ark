@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 packages = ["ark"]
 
 [tool.setuptools.package-data]
-ark = ["geodata/*.csv"]
+ark = ["geodata/*.csv", "webapp/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
