@@ -11,6 +11,7 @@ Commands:
   ark quarantine ACTION [BATCH] [--dry-run]       reversibly declutter (near-duplicates/blurry/…) + undo
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
+  ark mirror  [--vault DIR] [--verify]             replicate the store to the off-site [backup] target
   ark watch   [--vault DIR] [--once] [--dry-run]   auto-ingest volumes as they connect
 """
 
@@ -36,6 +37,7 @@ from . import (
     similar as similar_mod, quarantine as quarantine_mod, watch as watch_mod,
     insights as insights_mod,
 )
+from .mirror import Mirror
 
 
 def _vault_arg(p: argparse.ArgumentParser) -> None:
@@ -101,6 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("verify", help="re-hash every stored object (integrity check)")
     _vault_arg(pv)
 
+    pm = sub.add_parser("mirror", help="replicate the object store to the off-site [backup] target")
+    _vault_arg(pm)
+    pm.add_argument("--verify", action="store_true", help="check the mirror instead of syncing to it")
+
     pw = sub.add_parser("watch", help="auto-ingest volumes as they connect (non-destructive)")
     _vault_arg(pw)
     pw.add_argument("--once", action="store_true", help="sweep currently-mounted volumes once, then exit")
@@ -146,6 +152,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_rules(args)
     if args.cmd == "verify":
         return cmd_verify(args)
+    if args.cmd == "mirror":
+        return cmd_mirror(args)
     if args.cmd == "watch":
         return cmd_watch(args)
     return 2
@@ -224,6 +232,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"  unchanged     : {c['unchanged']}   (already stored, nothing written)")
         if c.get("healed"):
             print(f"  healed        : {c['healed']}   (corrupt vault objects rewritten from source)")
+        if c.get("mirrored") or c.get("mirror_failed"):
+            extra = f"   ({c['mirror_failed']} failed — run `ark mirror` to catch up)" if c.get("mirror_failed") else ""
+            print(f"  mirrored      : {c['mirrored']}   (replicated off-site){extra}")
         print(f"  needs review  : {c['needs_review']}")
         print(f"  failed        : {c['failed']}")
         if c["by_kind"]:
@@ -560,6 +571,62 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 1
     else:
         print("✓ integrity OK — every stored object re-hashes to its content address")
+    return 0
+
+
+def cmd_mirror(args: argparse.Namespace) -> int:
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault}")
+        return 1
+    cfg = load_config(vault)
+    mirror = Mirror.from_config(cfg, vault)
+    if not mirror.enabled:
+        msg = (f"no off-site mirror configured. Set [backup] path in "
+               f"{vault / DIR_META / CONFIG_FILENAME} to an external SSD / NAS mount "
+               f"(different from the vault), then re-run `ark mirror`.")
+        if cfg.backup.kind == "cloud":
+            msg = "cloud mirror targets aren't supported yet (no object-store adapter shipped)."
+        if args.json:
+            print(json.dumps({"enabled": False, "message": msg}))
+        else:
+            print(msg)
+        return 0
+
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        objs = [(r["object_path"], r["hash"]) for r in db.objects_for_verify()]
+
+    if args.verify:
+        problems = mirror.verify(objs)
+        if args.json:
+            print(json.dumps({"target": str(mirror.root), "objects": len(objs),
+                              "ok": not problems, "problems": problems}, indent=2))
+        elif problems:
+            _err(f"✗ mirror check FAILED — {len(problems)} problem(s) at {mirror.root}:")
+            for p in problems[:50]:
+                print(f"    {p}")
+            print("  Fix: `ark mirror` to re-replicate missing/corrupt objects.")
+            return 1
+        else:
+            print(f"✓ mirror OK — all {len(objs)} objects present + verified at {mirror.root}")
+        return 0
+
+    st = mirror.sync(vault, objs)
+    if args.json:
+        print(json.dumps({"target": str(mirror.root), "replicated": st.replicated,
+                          "already_present": st.already_present, "failed": st.failed,
+                          "missing_source": st.missing_source, "problems": st.problems}, indent=2))
+        return 0
+    print(f"🪞  mirror → {mirror.root}")
+    print(f"    {st.replicated} newly replicated · {st.already_present} already present · "
+          f"{st.failed} failed")
+    if st.problems:
+        for p in st.problems[:20]:
+            print(f"    ⚠ {p}")
+        if mirror.root and not mirror.root.exists():
+            print("    (mirror target not reachable — reconnect the drive/NAS and re-run)")
+        return 1
+    print(f"    ✓ {len(objs)} objects are now in two places.")
     return 0
 
 

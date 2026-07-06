@@ -57,6 +57,7 @@ $PY -m ark verify                    # re-hash every object (integrity)
 | `ark similar [--distance N] [--blur-threshold X]` | Find **near-duplicate** photos (visually the same shot, different bytes) and **blurry** ones. Read-only; suggests a keeper per group. |
 | `ark insights` | Reasoning layer: a transparent **keep-score** (precious/normal/junk, every point justified), **missing-backup** (precious single-copy items to mirror), and **per-device** coverage + capture gaps. Read-only. |
 | `ark watch [--once] [--dry-run]` | **Auto-ingest on connect** — scans a volume the moment it mounts (`/Volumes`), matched against a config allowlist. Non-destructive; a reconnected card is re-scanned (dedup makes it cheap). |
+| `ark mirror [--verify]` | Replicate the object store to the `[backup]` target (an external SSD / NAS), atomically + hash-verified, so your vault survives losing either disk. Set `[backup] path` to somewhere other than the vault to enable; scans then mirror new objects automatically. |
 | `ark quarantine {near-duplicates,blurry,duplicates,list,undo}` | Reversibly move redundant/blurry **organized-view links** into `quarantine/` with an undo manifest. Objects and sources are never touched; `undo` restores everything. `--dry-run` previews. |
 | `ark status` | Vault stats: assets, distinct objects, bytes saved by dedup, per-kind. |
 | `ark rules [--validate]` | Show / validate the organization rules. |

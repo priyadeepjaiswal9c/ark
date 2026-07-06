@@ -62,15 +62,16 @@ def _scene(w: int, h: int, color, seed: str) -> Image.Image:
     r0, g0, b0 = color
     top = (r0, g0, b0)
     bot = (max(0, r0 - 90), max(0, g0 - 90), max(0, b0 - 90))
-    img = Image.new("RGB", (w, h))
-    px = img.load()
+    # Build the vertical gradient as a 1-px-wide column (h writes), then stretch
+    # to full width — orders of magnitude faster than a per-pixel double loop.
+    col = Image.new("RGB", (1, h))
+    cpx = col.load()
     for y in range(h):
         t = y / max(1, h - 1)
-        row = (int(top[0] * (1 - t) + bot[0] * t),
-               int(top[1] * (1 - t) + bot[1] * t),
-               int(top[2] * (1 - t) + bot[2] * t))
-        for x in range(w):
-            px[x, y] = row
+        cpx[0, y] = (int(top[0] * (1 - t) + bot[0] * t),
+                     int(top[1] * (1 - t) + bot[1] * t),
+                     int(top[2] * (1 - t) + bot[2] * t))
+    img = col.resize((w, h))
     d = ImageDraw.Draw(img)
     for _ in range(rng.randint(5, 8)):
         x0, y0 = rng.randint(0, w - 1), rng.randint(0, h - 1)

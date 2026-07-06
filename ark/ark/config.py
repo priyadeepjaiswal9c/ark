@@ -170,6 +170,8 @@ def render_config_toml(cfg: Config) -> str:
         "",
         "[backup]",
         f'kind = "{cfg.backup.kind}"   # local | external | nas | cloud',
+        "# Off-site MIRROR target — set to an external SSD/NAS (different from the vault)",
+        "# and every object is also replicated + verified there. Equal to the vault = no mirror.",
         f'path = {_toml_str(cfg.backup.path)}',
         "",
         "[options]",
