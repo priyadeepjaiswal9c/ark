@@ -10,6 +10,7 @@ Commands:
   ark quarantine ACTION [BATCH] [--dry-run]       reversibly declutter (near-duplicates/blurry/…) + undo
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
+  ark watch   [--vault DIR] [--once] [--dry-run]   auto-ingest volumes as they connect
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from .db import Database
 from .backup import VaultWriter
 from . import (
     pipeline, report, rules as rules_mod, search as search_mod,
-    similar as similar_mod, quarantine as quarantine_mod,
+    similar as similar_mod, quarantine as quarantine_mod, watch as watch_mod,
 )
 
 
@@ -93,6 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("verify", help="re-hash every stored object (integrity check)")
     _vault_arg(pv)
+
+    pw = sub.add_parser("watch", help="auto-ingest volumes as they connect (non-destructive)")
+    _vault_arg(pw)
+    pw.add_argument("--once", action="store_true", help="sweep currently-mounted volumes once, then exit")
+    pw.add_argument("--interval", type=float, default=None, help="seconds between mount-root polls")
+    pw.add_argument("--mount-root", default=None, help="where volumes mount (default: config / /Volumes)")
+    pw.add_argument("--dry-run", action="store_true", help="preview scans — writes nothing")
     return p
 
 
@@ -130,6 +138,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_rules(args)
     if args.cmd == "verify":
         return cmd_verify(args)
+    if args.cmd == "watch":
+        return cmd_watch(args)
     return 2
 
 
@@ -492,6 +502,62 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 1
     else:
         print("✓ integrity OK — every stored object re-hashes to its content address")
+    return 0
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    import dataclasses
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault} — run `ark init --vault {vault}` first")
+        return 1
+    cfg = load_config(vault)
+    wc = cfg.watch
+    overrides = {}
+    if args.interval is not None:
+        overrides["interval"] = args.interval
+    if args.mount_root is not None:
+        overrides["mount_root"] = args.mount_root
+    if overrides:
+        wc = dataclasses.replace(wc, **overrides)
+
+    def scan_one(name: str, vol_path: Path) -> watch_mod.ScanEvent:
+        try:
+            stats = pipeline.run(vol_path, vault, cfg, dry_run=args.dry_run)
+            c = stats.as_counts()
+            detail = (f"{c['stored']} new · {c['duplicates']} dup · "
+                      f"{c['unchanged']} unchanged · {c['failed']} failed"
+                      f"{'  (dry-run)' if args.dry_run else ''}")
+            return watch_mod.ScanEvent(name, str(vol_path), True, detail)
+        except Exception as e:  # a bad volume must never kill the watcher
+            return watch_mod.ScanEvent(name, str(vol_path), False, f"scan error: {e}")
+
+    def on_event(e: watch_mod.ScanEvent) -> None:
+        if args.json:
+            print(json.dumps({"volume": e.volume, "path": e.path,
+                              "scanned": e.scanned, "detail": e.detail}), flush=True)
+        elif e.scanned:
+            print(f"  ⤵ ingested  {e.volume:24} {e.detail}", flush=True)
+        else:
+            print(f"  · skipped   {e.volume:24} {e.detail}", flush=True)
+
+    if not args.json:
+        mode = "once" if args.once else f"every {wc.interval:g}s"
+        print(f"👁  ARK watch — {wc.mount_root} → {vault}")
+        print(f"    allowlist: {list(wc.sources)}   mode: {mode}"
+              f"{'   (dry-run)' if args.dry_run else ''}")
+        if not args.once:
+            print("    Ctrl-C to stop.\n")
+        else:
+            print("")
+
+    try:
+        events = watch_mod.watch_loop(wc, scan_one, on_event=on_event, once=args.once)
+    except KeyboardInterrupt:
+        print("\nstopped.", file=sys.stderr)
+        return 0
+    if args.once and not args.json and not events:
+        print("  (no matching volumes mounted right now)")
     return 0
 
 

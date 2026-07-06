@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import CONFIG_FILENAME
+from .watch import WatchConfig
 
 
 @dataclass
@@ -49,6 +50,8 @@ class Config:
     # config-driven without importing Pillow at config-load time)
     near_dup_distance: int = 10    # dHash Hamming <= this == "the same picture"
     blur_threshold: float = 60.0   # Laplacian variance < this == "likely blurry"
+    # auto-ingest-on-connect settings (see ark.watch)
+    watch: WatchConfig = field(default_factory=WatchConfig)
 
     @property
     def raw_rules(self) -> list[RuleSpec]:
@@ -142,6 +145,20 @@ def load_config(vault: Path) -> Config:
         link_mode=opts.get("link_mode", Config.link_mode),
         near_dup_distance=int(opts.get("near_dup_distance", Config.near_dup_distance)),
         blur_threshold=float(opts.get("blur_threshold", Config.blur_threshold)),
+        watch=_load_watch(data.get("watch", {})),
+    )
+
+
+def _load_watch(w: dict) -> WatchConfig:
+    d = WatchConfig()
+    return WatchConfig(
+        enabled=bool(w.get("enabled", d.enabled)),
+        interval=float(w.get("interval", d.interval)),
+        debounce=float(w.get("debounce", d.debounce)),
+        mount_root=str(w.get("mount_root", d.mount_root)),
+        sources=tuple(w.get("sources", d.sources)),
+        ignore=tuple(w.get("ignore", d.ignore)),
+        subpath=str(w.get("subpath", d.subpath)),
     )
 
 
@@ -161,6 +178,17 @@ def render_config_toml(cfg: Config) -> str:
         f'review_to = {_toml_str(cfg.review_to)}',
         f'near_dup_distance = {cfg.near_dup_distance}   # perceptual Hamming distance for near-duplicates',
         f'blur_threshold = {cfg.blur_threshold}   # Laplacian variance below == likely blurry',
+        "",
+        "# Auto-ingest on connect (ark watch): scan a volume the moment it mounts.",
+        "# Non-destructive like every scan; a reconnected card is re-scanned (dedup makes it cheap).",
+        "[watch]",
+        f'enabled = {str(cfg.watch.enabled).lower()}',
+        f'interval = {cfg.watch.interval}   # seconds between mount-root polls',
+        f'debounce = {cfg.watch.debounce}   # settle time after a volume appears',
+        f'mount_root = {_toml_str(cfg.watch.mount_root)}   # macOS: /Volumes',
+        f'sources = [{", ".join(_toml_str(s) for s in cfg.watch.sources)}]   # volume-name globs to ingest',
+        f'ignore = [{", ".join(_toml_str(s) for s in cfg.watch.ignore)}]',
+        f'subpath = {_toml_str(cfg.watch.subpath)}   # optional subdir to scan, e.g. "DCIM"',
         "",
         "# Parametric organization rules — evaluated top-to-bottom; first match wins.",
         "# `when` is a safe expression over asset fields (kind, place.city, taken_at.year, ...).",
