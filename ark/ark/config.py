@@ -45,6 +45,10 @@ class Config:
     review_to: str = "_NeedsReview/{kind}"
     # link strategy for the organized/ tree: hardlink (no data dup) or symlink or copy
     link_mode: str = "hardlink"    # hardlink | symlink | copy
+    # perceptual thresholds (mirror ark.perceptual defaults; kept here so they're
+    # config-driven without importing Pillow at config-load time)
+    near_dup_distance: int = 10    # dHash Hamming <= this == "the same picture"
+    blur_threshold: float = 60.0   # Laplacian variance < this == "likely blurry"
 
     @property
     def raw_rules(self) -> list[RuleSpec]:
@@ -136,6 +140,8 @@ def load_config(vault: Path) -> Config:
         fallback_to=opts.get("fallback_to", Config.fallback_to),
         review_to=opts.get("review_to", Config.review_to),
         link_mode=opts.get("link_mode", Config.link_mode),
+        near_dup_distance=int(opts.get("near_dup_distance", Config.near_dup_distance)),
+        blur_threshold=float(opts.get("blur_threshold", Config.blur_threshold)),
     )
 
 
@@ -153,6 +159,8 @@ def render_config_toml(cfg: Config) -> str:
         f'link_mode = "{cfg.link_mode}"   # hardlink | symlink | copy',
         f'fallback_to = {_toml_str(cfg.fallback_to)}',
         f'review_to = {_toml_str(cfg.review_to)}',
+        f'near_dup_distance = {cfg.near_dup_distance}   # perceptual Hamming distance for near-duplicates',
+        f'blur_threshold = {cfg.blur_threshold}   # Laplacian variance below == likely blurry',
         "",
         "# Parametric organization rules — evaluated top-to-bottom; first match wins.",
         "# `when` is a safe expression over asset fields (kind, place.city, taken_at.year, ...).",

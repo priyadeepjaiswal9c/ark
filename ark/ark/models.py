@@ -49,6 +49,9 @@ class Asset:
     camera_model: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    # perceptual signals (images only; None when not computable)
+    phash: Optional[str] = None          # dHash fingerprint for near-duplicate detection
+    blur: Optional[float] = None         # Laplacian variance; low == likely blurry
 
     # parametric extension: arbitrary user/derived fields (invoice vendor, project, ...)
     custom: dict[str, Any] = field(default_factory=dict)
@@ -83,6 +86,7 @@ class Asset:
             "camera_model": self.camera_model,
             "width": self.width,
             "height": self.height,
+            "blur": self.blur,           # power users can route blurry shots by rule
             "lat": self.lat,
             "lon": self.lon,
             "tags": list(self.tags),

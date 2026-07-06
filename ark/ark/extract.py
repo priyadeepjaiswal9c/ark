@@ -18,6 +18,7 @@ import piexif
 from PIL import Image
 
 from . import filetype
+from . import perceptual
 from .constants import KIND_IMAGE
 from .hashing import hash_file
 from .models import Asset
@@ -60,10 +61,14 @@ def extract(path: str | Path) -> Asset:
 
 
 def _extract_image(p: Path, asset: Asset) -> None:
-    # Dimensions (works for jpg/png/gif/webp/bmp/tiff; HEIC needs a plugin — skip soft).
+    # Dimensions + perceptual signals in one decode (jpg/png/gif/webp/bmp/tiff;
+    # HEIC needs a plugin — all of this just stays None if Pillow can't decode).
     try:
         with Image.open(p) as im:
             asset.width, asset.height = im.width, im.height
+            im.load()
+            asset.phash = perceptual.dhash(im)
+            asset.blur = round(perceptual.blur_variance(im), 2)
     except Exception:
         pass
 

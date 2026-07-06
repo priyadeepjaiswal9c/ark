@@ -23,7 +23,7 @@ from typing import Any, Iterable, Optional
 
 from .models import Asset, GeoPlace
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Database:
@@ -75,6 +75,7 @@ class Database:
                 width INTEGER, height INTEGER,
                 organized_path TEXT, matched_rule TEXT,
                 status TEXT, needs_review TEXT,
+                phash TEXT, blur REAL,
                 first_seen TEXT, last_seen TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_assets_hash ON assets(hash);
@@ -107,8 +108,28 @@ class Database:
                 started_at TEXT, finished_at TEXT,
                 source TEXT, mode TEXT, counts TEXT, notes TEXT
             );
+
+            -- Reversible quarantine: one row per organized/ entry relocated into
+            -- quarantine/. The vault OBJECT and the SOURCE are never touched, so
+            -- every row is fully undoable. Active rows have restored_at IS NULL.
+            CREATE TABLE IF NOT EXISTS quarantine (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch TEXT NOT NULL,
+                asset_id INTEGER,
+                source_path TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                reason TEXT,
+                original_relpath TEXT NOT NULL,
+                quarantine_relpath TEXT NOT NULL,
+                quarantined_at TEXT NOT NULL,
+                restored_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_quarantine_batch ON quarantine(batch);
+            CREATE INDEX IF NOT EXISTS idx_quarantine_active
+                ON quarantine(source_path) WHERE restored_at IS NULL;
             """
         )
+        self._ensure_columns()
         if self.fts:
             c.executescript(
                 """
@@ -118,10 +139,25 @@ class Database:
                 """
             )
         c.execute(
-            "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)",
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
             (str(SCHEMA_VERSION),),
         )
         c.commit()
+
+    def _ensure_columns(self) -> None:
+        """Additive migration for vaults created before a column existed.
+
+        ``CREATE TABLE IF NOT EXISTS`` never adds columns to an existing table,
+        so a v1 vault keeps its old ``assets`` shape. Add anything missing with
+        ALTER TABLE (nullable, no default) — existing rows read the new columns
+        as NULL and a rescan backfills them."""
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(assets)")}
+        for col, decl in (("phash", "TEXT"), ("blur", "REAL")):
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {decl}")
+        # Index built here (not in the schema script) so it works whether phash
+        # was created inline (fresh vault) or just added by the ALTER above.
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_phash ON assets(phash)")
 
     # ---- objects (dedup store) -------------------------------------------
     def get_object(self, h: str) -> Optional[sqlite3.Row]:
@@ -160,6 +196,7 @@ class Database:
             a.camera_make, a.camera_model, a.width, a.height,
             a.organized_path, a.matched_rule, a.status,
             json.dumps(a.needs_review_reasons) if a.needs_review_reasons else None,
+            a.phash, a.blur,
         )
         cur = self.conn.execute(
             """INSERT INTO assets(
@@ -167,8 +204,8 @@ class Database:
                     taken_at,taken_at_source,lat,lon,place_city,place_admin,
                     place_country,place_cc,place_dist_km,camera_make,camera_model,
                     width,height,organized_path,matched_rule,status,needs_review,
-                    first_seen,last_seen)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    phash,blur,first_seen,last_seen)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_path) DO UPDATE SET
                     hash=excluded.hash, size=excluded.size, kind=excluded.kind,
                     taken_at=excluded.taken_at, taken_at_source=excluded.taken_at_source,
@@ -179,6 +216,7 @@ class Database:
                     width=excluded.width, height=excluded.height,
                     organized_path=excluded.organized_path, matched_rule=excluded.matched_rule,
                     status=excluded.status, needs_review=excluded.needs_review,
+                    phash=excluded.phash, blur=excluded.blur,
                     last_seen=excluded.last_seen""",
             row + (now, now),
         )
@@ -259,6 +297,25 @@ class Database:
 
     def all_assets(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM assets ORDER BY id").fetchall()
+
+    def images_for_similarity(self) -> list[sqlite3.Row]:
+        """Image assets that carry (or should carry) a perceptual signal.
+
+        Ordered by id so a stable representative is picked per content-hash.
+        Excludes failed assets — there's nothing to compare or quarantine."""
+        return self.conn.execute(
+            """SELECT id, source_path, hash, organized_path, matched_rule,
+                      size, taken_at, place_city, place_country, status,
+                      phash, blur
+               FROM assets
+               WHERE kind='image' AND status != 'failed'
+               ORDER BY id"""
+        ).fetchall()
+
+    def set_perceptual(self, asset_id: int, phash: Optional[str], blur: Optional[float]) -> None:
+        """Backfill a computed perceptual signal onto an existing asset row."""
+        self.conn.execute(
+            "UPDATE assets SET phash=?, blur=? WHERE id=?", (phash, blur, asset_id))
 
     def objects_for_verify(self) -> Iterable[sqlite3.Row]:
         return self.conn.execute("SELECT hash,object_path,size FROM objects").fetchall()

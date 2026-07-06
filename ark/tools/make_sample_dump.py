@@ -6,16 +6,26 @@ dates, a December Goa trip (for the trip rule), an invoice PDF, plain docs, a
 video, plus the messy edge cases ARK must survive — a photo with no EXIF at all,
 an exact byte-for-byte duplicate, and awkward filenames.
 
+For the P2 perceptual layer the dump also carries two things a real camera roll
+always has: a *near*-duplicate (a re-saved, resized edit of an existing shot —
+visually the same picture but different bytes, so content-hash dedup misses it)
+and a *blurry* out-of-focus frame.
+
+Every photo renders a distinct little scene (a seeded scatter of shapes over a
+gradient) so the images are genuinely visually different — otherwise every
+perceptual hash would collide and near-duplicate detection couldn't be shown.
+
 Run:  python tools/make_sample_dump.py [target_dir]   (default: ./sample-dump)
 """
 from __future__ import annotations
 
+import random
 import shutil
 import sys
 from pathlib import Path
 
 import piexif
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 # (filename, subdir, w, h, color, make, model, "YYYY:MM:DD HH:MM:SS", tz, lat, lon)
 PHOTOS = [
@@ -44,12 +54,37 @@ def _dms(deg: float):
     return ((d, 1), (m, 1), (int(s * 100), 100))
 
 
-def _make_jpeg(path: Path, w, h, color, make, model, dt, tz, lat, lon) -> None:
-    img = Image.new("RGB", (w, h), color)
+def _scene(w: int, h: int, color, seed: str) -> Image.Image:
+    """A distinctive little scene: a vertical gradient plus a seeded scatter of
+    big shapes. Deterministic per ``seed`` so runs are reproducible, and varied
+    enough that each photo gets its own perceptual hash."""
+    rng = random.Random(seed)
+    r0, g0, b0 = color
+    top = (r0, g0, b0)
+    bot = (max(0, r0 - 90), max(0, g0 - 90), max(0, b0 - 90))
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(h):
+        t = y / max(1, h - 1)
+        row = (int(top[0] * (1 - t) + bot[0] * t),
+               int(top[1] * (1 - t) + bot[1] * t),
+               int(top[2] * (1 - t) + bot[2] * t))
+        for x in range(w):
+            px[x, y] = row
     d = ImageDraw.Draw(img)
-    d.rectangle([w * 0.1, h * 0.1, w * 0.9, h * 0.9], outline=(255, 255, 255), width=3)
-    d.text((w * 0.15, h * 0.15), path.stem, fill=(255, 255, 255))
+    for _ in range(rng.randint(5, 8)):
+        x0, y0 = rng.randint(0, w - 1), rng.randint(0, h - 1)
+        x1 = min(w, x0 + rng.randint(w // 6, w // 2))
+        y1 = min(h, y0 + rng.randint(h // 6, h // 2))
+        fill = (rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255))
+        if rng.random() < 0.5:
+            d.ellipse([x0, y0, x1, y1], fill=fill)
+        else:
+            d.rectangle([x0, y0, x1, y1], fill=fill)
+    return img
 
+
+def _exif_bytes(make, model, dt, tz, lat, lon) -> bytes:
     zeroth = {piexif.ImageIFD.Make: make.encode(), piexif.ImageIFD.Model: model.encode()}
     exif = {
         piexif.ExifIFD.DateTimeOriginal: dt.encode(),
@@ -61,9 +96,18 @@ def _make_jpeg(path: Path, w, h, color, make, model, dt, tz, lat, lon) -> None:
         piexif.GPSIFD.GPSLongitudeRef: b"E" if lon >= 0 else b"W",
         piexif.GPSIFD.GPSLongitude: _dms(lon),
     }
-    exif_bytes = piexif.dump({"0th": zeroth, "Exif": exif, "GPS": gps, "1st": {}, "thumbnail": None})
+    return piexif.dump({"0th": zeroth, "Exif": exif, "GPS": gps, "1st": {}, "thumbnail": None})
+
+
+def _save_jpeg(img: Image.Image, path: Path, exif_bytes: bytes, quality: int = 85) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(path, "jpeg", exif=exif_bytes, quality=85)
+    img.save(path, "jpeg", exif=exif_bytes, quality=quality)
+
+
+def _make_jpeg(path: Path, w, h, color, make, model, dt, tz, lat, lon) -> None:
+    img = _scene(w, h, color, path.stem)
+    ImageDraw.Draw(img).text((w * 0.15, h * 0.15), path.stem, fill=(255, 255, 255))
+    _save_jpeg(img, path, _exif_bytes(make, model, dt, tz, lat, lon))
 
 
 _MIN_PDF = (
@@ -97,6 +141,25 @@ def main() -> None:
 
     # exact duplicate (same bytes, different name + folder) -> dedup + cleanup intel
     shutil.copy2(target / "IMG_20251224_101500.jpg", target / "DCIM" / "copy_of_goa.jpg")
+    n += 1
+
+    # NEAR-duplicate: the SF shot, resized and re-encoded at lower quality (a
+    # "cleaned up" edit). Same picture to the eye + same EXIF, but different
+    # bytes — content-hash dedup can't catch it; perceptual dHash can.
+    sf = target / "IMG_20250704_183000.jpg"
+    edit = Image.open(sf)
+    edit = edit.resize((edit.width * 3 // 4, edit.height * 3 // 4)).resize((edit.width, edit.height))
+    _save_jpeg(edit, target / "edits" / "IMG_20250704_183000_edited.jpg",
+               _exif_bytes("Google", "Pixel 8 Pro", "2025:07:04 18:30:00", "-07:00", 37.7749, -122.4194),
+               quality=55)
+    n += 1
+
+    # BLURRY: a genuinely out-of-focus frame (its own distinct scene, heavily
+    # Gaussian-blurred). Low Laplacian variance -> flagged as likely blurry.
+    blurry = _scene(800, 600, (70, 140, 110), "blurry-lakeside-2025").filter(ImageFilter.GaussianBlur(7))
+    _save_jpeg(blurry, target / "DCIM" / "IMG_20251103_193000.jpg",
+               _exif_bytes("samsung", "SM-S911B", "2025:11:03 19:30:00", "+05:30", 19.0760, 72.8777),
+               quality=85)
     n += 1
 
     # photo with NO EXIF at all -> needs review (no date, no place)

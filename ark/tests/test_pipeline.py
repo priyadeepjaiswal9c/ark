@@ -45,10 +45,10 @@ def scanned(tmp_path):
 def test_counts(scanned):
     _, _, stats = scanned
     c = stats.as_counts()
-    assert c["total"] == 12
-    assert c["duplicates"] == 1          # copy_of_goa.jpg
+    assert c["total"] == 14
+    assert c["duplicates"] == 1          # copy_of_goa.jpg (byte-identical; near-dup is NOT a dup)
     assert c["failed"] == 0
-    assert c["by_kind"]["image"] == 9
+    assert c["by_kind"]["image"] == 11   # 7 scenes + exact copy + near-dup edit + blurry + no-exif png
 
 
 def test_goa_trip_grouped(scanned):
@@ -64,8 +64,8 @@ def test_dedup_single_object(scanned):
     _, vault, stats = scanned
     with Database(vault / DIR_META / DB_FILENAME) as db:
         s = db.stats()
-    assert s["assets"] == 12
-    assert s["objects"] == 11             # one pair deduped
+    assert s["assets"] == 14
+    assert s["objects"] == 13             # only the byte-identical pair dedups (near-dup stays distinct)
     assert s["duplicates"] == 1
 
 
@@ -84,7 +84,7 @@ def test_cleanup_report_is_safe_and_proven(scanned):
     with Database(vault / DIR_META / DB_FILENAME) as db:
         rep = report.cleanup_report(db, vault)
     # every backed-up, verified source is clearable; the exact copy is flagged
-    assert len(rep.safe_to_delete) == 12
+    assert len(rep.safe_to_delete) == 14
     assert rep.at_risk == []
     assert rep.exact_duplicates == 1               # 2 identical files == 1 redundant EXTRA
     dup_names = {Path(c.source_path).name for c in rep.safe_to_delete if c.is_exact_duplicate}
@@ -117,5 +117,5 @@ def test_rescan_is_idempotent(scanned):
     with Database(vault / DIR_META / DB_FILENAME) as db:
         s = db.stats()
     # a second scan must not create new assets or objects
-    assert s["assets"] == 12
-    assert s["objects"] == 11
+    assert s["assets"] == 14
+    assert s["objects"] == 13

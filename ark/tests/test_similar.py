@@ -1,0 +1,72 @@
+"""End-to-end similarity intelligence over the sample vault: near-duplicate
+grouping (distinct content, not byte copies) and blurry-photo detection."""
+
+from pathlib import Path
+
+from ark import similar as similar_mod
+from ark.constants import DIR_META, DB_FILENAME
+from ark.db import Database
+
+
+def _report(vault):
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        return similar_mod.analyze_vault(db, vault)
+
+
+def test_near_dup_finds_the_edit_not_the_exact_copy(scanned):
+    _, vault, _ = scanned
+    rep = _report(vault)
+    # exactly one near-duplicate group: the SF original + its re-saved edit
+    assert len(rep.near_dup_groups) == 1
+    g = rep.near_dup_groups[0]
+    names = {Path(m.source_path).name for m in g.members}
+    assert names == {"IMG_20250704_183000.jpg", "IMG_20250704_183000_edited.jpg"}
+    # every member is a DISTINCT content hash — the byte-identical copy_of_goa
+    # pair collapses to one representative and never shows up here.
+    assert len({m.hash for m in g.members}) == len(g.members)
+    all_members = {Path(m.source_path).name for grp in rep.near_dup_groups for m in grp.members}
+    assert "copy_of_goa.jpg" not in all_members
+
+
+def test_keeper_is_the_higher_fidelity_original(scanned):
+    _, vault, _ = scanned
+    g = _report(vault).near_dup_groups[0]
+    # near-tied sharpness -> keep the larger (original), quarantine the small edit
+    assert Path(g.keeper.source_path).name == "IMG_20250704_183000.jpg"
+    assert [Path(m.source_path).name for m in g.redundant] == ["IMG_20250704_183000_edited.jpg"]
+    assert g.reclaimable_bytes == g.redundant[0].size
+
+
+def test_blurry_photo_is_flagged(scanned):
+    _, vault, _ = scanned
+    rep = _report(vault)
+    blurry = {Path(b.source_path).name for b in rep.blurry}
+    assert "IMG_20251103_193000.jpg" in blurry            # the out-of-focus shot
+    # and it is genuinely below the sharp photos
+    assert all(b.blur < rep.blur_threshold for b in rep.blurry)
+
+
+def test_backfill_recomputes_missing_signals(scanned):
+    _, vault, _ = scanned
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        # wipe the perceptual signal off every image (simulating a pre-P2 vault)
+        db.conn.execute("UPDATE assets SET phash=NULL, blur=NULL WHERE kind='image'")
+        db.commit()
+        # with backfill off, nothing can be grouped
+        bare = similar_mod.analyze_vault(db, vault, backfill=False)
+        assert bare.near_dup_groups == [] and bare.blurry == []
+        # with backfill on, signals are recomputed from the vault objects...
+        healed = similar_mod.analyze_vault(db, vault, backfill=True)
+        assert len(healed.near_dup_groups) == 1
+        # ...and persisted, so a later read needs no backfill
+        again = similar_mod.analyze_vault(db, vault, backfill=False)
+        assert len(again.near_dup_groups) == 1
+
+
+def test_distance_threshold_is_respected(scanned):
+    _, vault, _ = scanned
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        # distance 0 == require identical dHash: the recompressed edit differs
+        # by a couple of bits, so no near-dup group survives.
+        strict = similar_mod.analyze_vault(db, vault, distance=0)
+    assert strict.near_dup_groups == []

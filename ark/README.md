@@ -36,6 +36,8 @@ $PY -m ark scan sample-dump          # commit: organize + back up (sources untou
 $PY -m ark search "the PDF from the Goa trip"
 $PY -m ark search kind:image place:Goa year:2025
 $PY -m ark cleanup                   # what's safe to delete from your phone
+$PY -m ark similar                   # near-duplicate + blurry-photo report
+$PY -m ark quarantine near-duplicates --dry-run   # preview a reversible declutter
 $PY -m ark status
 $PY -m ark verify                    # re-hash every object (integrity)
 ```
@@ -52,6 +54,8 @@ $PY -m ark verify                    # re-hash every object (integrity)
 | `ark scan SRC [--dry-run]` | Ingest a dump: extract metadata, geocode, dedup, organize by rules, back up. `--dry-run` previews with **zero writes**. |
 | `ark search QUERY` | Natural-language-ish search: free text + filters (`kind:`, `place:`, `year:`, `camera:`). |
 | `ark cleanup` | The safe-to-delete-from-phone report — duplicates proven already in the vault. Suggests, never deletes. |
+| `ark similar [--distance N] [--blur-threshold X]` | Find **near-duplicate** photos (visually the same shot, different bytes) and **blurry** ones. Read-only; suggests a keeper per group. |
+| `ark quarantine {near-duplicates,blurry,duplicates,list,undo}` | Reversibly move redundant/blurry **organized-view links** into `quarantine/` with an undo manifest. Objects and sources are never touched; `undo` restores everything. `--dry-run` previews. |
 | `ark status` | Vault stats: assets, distinct objects, bytes saved by dedup, per-kind. |
 | `ark rules [--validate]` | Show / validate the organization rules. |
 | `ark verify` | Re-hash every stored object against its content address (corruption check). |

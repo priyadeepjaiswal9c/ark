@@ -6,6 +6,7 @@ Commands:
   ark status  [--vault DIR]                      vault stats
   ark search  QUERY... [--vault DIR] [--limit N] natural-language-ish search
   ark cleanup [--vault DIR]                       safe-to-delete-from-phone report
+  ark similar [--vault DIR] [--distance N]        near-duplicate + blurry-photo report
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
 """
@@ -27,7 +28,10 @@ from .constants import (
 )
 from .db import Database
 from .backup import VaultWriter
-from . import pipeline, report, rules as rules_mod, search as search_mod
+from . import (
+    pipeline, report, rules as rules_mod, search as search_mod,
+    similar as similar_mod,
+)
 
 
 def _vault_arg(p: argparse.ArgumentParser) -> None:
@@ -64,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("cleanup", help="safe-to-delete-from-phone report")
     _vault_arg(pc)
 
+    psi = sub.add_parser("similar", help="find near-duplicate and blurry photos")
+    _vault_arg(psi)
+    psi.add_argument("--distance", type=int, default=None,
+                     help="max perceptual Hamming distance for 'same picture' (default 10)")
+    psi.add_argument("--blur-threshold", type=float, default=None,
+                     help="Laplacian-variance below which a photo is 'blurry' (default 60)")
+
     pr = sub.add_parser("rules", help="show/validate organization rules")
     _vault_arg(pr)
     pr.add_argument("--validate", action="store_true")
@@ -99,6 +110,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_search(args)
     if args.cmd == "cleanup":
         return cmd_cleanup(args)
+    if args.cmd == "similar":
+        return cmd_similar(args)
     if args.cmd == "rules":
         return cmd_rules(args)
     if args.cmd == "verify":
@@ -280,6 +293,60 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
 
 def _cap(items: list, n: int) -> list:
     return items[:n]
+
+
+def cmd_similar(args: argparse.Namespace) -> int:
+    vault = Path(args.vault).expanduser().resolve()
+    if not _vault_ready(vault):
+        _err(f"no vault at {vault}")
+        return 1
+    cfg = load_config(vault)
+    distance = args.distance if args.distance is not None else cfg.near_dup_distance
+    blur_threshold = args.blur_threshold if args.blur_threshold is not None else cfg.blur_threshold
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        rep = similar_mod.analyze_vault(db, vault, distance=distance, blur_threshold=blur_threshold)
+
+    if args.json:
+        print(json.dumps({
+            "summary": rep.summary(),
+            "distance": rep.distance, "blur_threshold": rep.blur_threshold,
+            "images_scanned": rep.images_scanned,
+            "near_duplicate_groups": [
+                {"keep": g.keeper.display, "reclaimable_bytes": g.reclaimable_bytes,
+                 "members": [{"path": m.display, "source": m.source_path, "blur": m.blur,
+                              "size": m.size, "keep": m.id == g.keep_id} for m in g.members]}
+                for g in rep.near_dup_groups],
+            "blurry": [{"path": b.display, "source": b.source_path, "blur": b.blur}
+                       for b in rep.blurry],
+        }, indent=2))
+        return 0
+
+    print("🔎 Near-duplicate & blur scan")
+    print(f"   (perceptual dHash ≤ {distance} == same picture; "
+          f"Laplacian variance < {blur_threshold:g} == likely blurry)\n")
+    if rep.near_dup_groups:
+        print(f"  near-duplicate groups ({len(rep.near_dup_groups)}) — visually the same shot, different bytes:")
+        for i, g in enumerate(rep.near_dup_groups, 1):
+            print(f"    group {i} — {len(g.members)} photos, keep the best copy "
+                  f"({report._human(g.reclaimable_bytes)} reclaimable):")
+            for m in g.members:
+                mark = "★ keep" if m.id == g.keep_id else "  dup "
+                sharp = f"{m.blur:7.1f}" if m.blur is not None else "      ?"
+                print(f"      {mark}  blur {sharp}  {m.display}")
+    else:
+        print("  near-duplicate groups: none")
+    if rep.blurry:
+        print(f"\n  blurry photos ({len(rep.blurry)}) — lowest sharpness first:")
+        for b in _cap(rep.blurry, 20):
+            print(f"      blur {b.blur:7.1f}  {b.display}")
+        if len(rep.blurry) > 20:
+            print(f"      … and {len(rep.blurry) - 20} more (use --json for the full list)")
+    else:
+        print("\n  blurry photos: none")
+    print("\n" + rep.summary())
+    print("Nothing was changed. To reversibly declutter (with full undo):")
+    print("  ark quarantine near-duplicates      ark quarantine blurry")
+    return 0
 
 
 def cmd_rules(args: argparse.Namespace) -> int:
