@@ -33,6 +33,9 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # Two ARK processes can share a vault (e.g. `ark watch` + a manual scan).
+        # WAL serializes writers; wait for the lock instead of failing instantly.
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.fts = _fts5_available(self.conn)
         self._migrate()
 
@@ -154,7 +157,13 @@ class Database:
         have = {r["name"] for r in self.conn.execute("PRAGMA table_info(assets)")}
         for col, decl in (("phash", "TEXT"), ("blur", "REAL")):
             if col not in have:
-                self.conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {decl}")
+                try:
+                    self.conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {decl}")
+                except sqlite3.OperationalError as e:
+                    # A second process may have added the column between our
+                    # PRAGMA read and this ALTER — that's fine, it now exists.
+                    if "duplicate column name" not in str(e):
+                        raise
         # Index built here (not in the schema script) so it works whether phash
         # was created inline (fresh vault) or just added by the ALTER above.
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_assets_phash ON assets(phash)")

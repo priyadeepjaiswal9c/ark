@@ -149,14 +149,19 @@ def _pick_keeper(members: list[SimilarImage]) -> SimilarImage:
 
 
 def _is_better_keep(a: SimilarImage, b: SimilarImage) -> bool:
-    ba = a.blur if a.blur is not None else -1.0
-    bb = b.blur if b.blur is not None else -1.0
-    hi = max(ba, bb)
-    if hi > 0 and abs(ba - bb) <= _BLUR_TIE * hi:      # near-tie on sharpness
+    # If either blur is unknown we can't compare sharpness at all — fall back to
+    # file size (never let an unknown-blur image lose to a barely-positive, i.e.
+    # very blurry, one just because -1 < 0.001).
+    if a.blur is None or b.blur is None:
         if a.size != b.size:
             return a.size > b.size
         return a.id < b.id
-    return ba > bb
+    hi = max(a.blur, b.blur)
+    if hi > 0 and abs(a.blur - b.blur) <= _BLUR_TIE * hi:      # near-tie on sharpness
+        if a.size != b.size:
+            return a.size > b.size
+        return a.id < b.id
+    return a.blur > b.blur
 
 
 def _backfill(db: Database, vault: Path, images) -> None:

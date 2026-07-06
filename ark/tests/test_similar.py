@@ -4,8 +4,24 @@ grouping (distinct content, not byte copies) and blurry-photo detection."""
 from pathlib import Path
 
 from ark import similar as similar_mod
+from ark.similar import SimilarImage, _pick_keeper
 from ark.constants import DIR_META, DB_FILENAME
 from ark.db import Database
+
+
+def _img(id, size, blur):
+    return SimilarImage(id=id, source_path=f"/{id}.jpg", organized_path=None,
+                        hash=f"h{id}", size=size, blur=blur, phash="ff")
+
+
+def test_keeper_never_prefers_a_blurry_copy_over_unknown_blur():
+    # id=1 is barely-positive blur (i.e. VERY blurry); id=2 has unknown blur but
+    # is the larger, higher-fidelity file. The keeper must be the larger one,
+    # not the blurry one (regression: a -1 None-sentinel would pick the blurry).
+    blurry_small = _img(1, size=1000, blur=0.5)
+    unknown_large = _img(2, size=5000, blur=None)
+    assert _pick_keeper([blurry_small, unknown_large]).id == 2
+    assert _pick_keeper([unknown_large, blurry_small]).id == 2   # order-independent
 
 
 def _report(vault):

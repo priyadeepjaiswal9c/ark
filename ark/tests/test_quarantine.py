@@ -129,3 +129,20 @@ def test_second_quarantine_skips_already_active(scanned):
         plan = Q.plan(db, vault, "near-duplicates")
     assert plan.candidates == []                       # nothing new to move
     assert any("already quarantined" in why for _, why in plan.skipped)
+
+
+def test_apply_commits_each_entry_durably(scanned):
+    """Every moved entry is committed as it goes, not batched to the end — so a
+    crash mid-batch can never leave a moved file with no DB record (which a
+    rescan would silently un-quarantine). Prove durability by reading the record
+    back through a brand-new connection."""
+    _, vault, _ = scanned
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        plan = Q.plan(db, vault, "blurry")            # the sample has >1 blurry entry
+        res = Q.apply(db, vault, plan)
+    assert len(res.moved) >= 1
+    moved_sources = {c.source_path for c in res.moved}
+    # a fresh connection (nothing shared with the writer) must see them active
+    with Database(vault / DIR_META / DB_FILENAME) as fresh:
+        active = fresh.active_quarantine_sources()
+    assert moved_sources <= active

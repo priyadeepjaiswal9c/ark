@@ -2,6 +2,7 @@
 be additive and lossless (no rebuild, no data touched)."""
 
 import sqlite3
+import threading
 
 from ark.db import Database
 
@@ -64,3 +65,31 @@ def test_v1_to_v2_is_additive_and_lossless(tmp_path):
     cols2 = {r["name"] for r in db2.conn.execute("PRAGMA table_info(assets)")}
     assert "phash" in cols2 and "blur" in cols2
     db2.close()
+
+
+def test_concurrent_first_open_does_not_crash(tmp_path):
+    """Two processes opening a v1 vault at once must not race on ALTER TABLE:
+    the loser of the add-column race must swallow 'duplicate column name', and
+    the write lock must be waited on (busy_timeout), not failed immediately."""
+    db_path = tmp_path / "ark.db"
+    _make_v1_db(db_path)
+
+    errors = []
+    start = threading.Barrier(4)
+
+    def open_and_migrate():
+        try:
+            start.wait()
+            Database(db_path).close()
+        except Exception as e:                 # noqa: BLE001 — any crash fails the test
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=open_and_migrate) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], errors
+    cols = {r[1] for r in sqlite3.connect(str(db_path)).execute("PRAGMA table_info(assets)")}
+    assert "phash" in cols and "blur" in cols

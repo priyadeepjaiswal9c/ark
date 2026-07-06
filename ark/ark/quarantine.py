@@ -168,12 +168,17 @@ def apply(db: Database, vault: str | Path, plan: QuarantinePlan, dry_run: bool =
         except OSError as e:
             res.skipped.append((c.display, f"move failed: {e}"))
             continue
+        # Commit this entry NOW, before moving on. The rename is already durable,
+        # so the DB row must be too — otherwise a crash mid-batch would leave the
+        # file in quarantine/ with no record, and the next rescan would silently
+        # re-create its organized link (un-quarantine it). One commit per entry
+        # bounds any crash to a single in-flight file.
         db.add_quarantine_entry(batch, c.asset_id, c.source_path, c.hash,
                                 c.reason, c.original_relpath, q_rel, now)
+        db.commit()
         res.moved.append(c)
 
     if not dry_run and res.moved:
-        db.commit()
         _write_manifest(vault, batch, plan.reason, now, res.moved)
     return res
 
@@ -200,6 +205,7 @@ def _undo_one(db: Database, vault: Path, batch: str) -> UndoResult:
         if not q_abs.is_file():
             res.missing.append(e["quarantine_relpath"])
             db.mark_quarantine_restored(e["id"], now)   # nothing to move back
+            db.commit()
             continue
         target = want_abs
         if target.exists() or target.is_symlink():
@@ -209,13 +215,16 @@ def _undo_one(db: Database, vault: Path, batch: str) -> UndoResult:
             q_abs.rename(target)
         except OSError:
             continue                                    # leave the row active; a retry can fix it
+        # Same rule as apply(): the move is durable now, so record it now. A
+        # crash before this commit leaves the row active and the file already
+        # restored — a re-run's `not q_abs.is_file()` branch converges the DB.
         db.mark_quarantine_restored(e["id"], now)
+        db.commit()
         rel = str(target.relative_to(vault))
         if target == want_abs:
             res.restored.append(rel)
         else:
             res.relocated.append((e["original_relpath"], rel))
-    db.commit()
     _prune_empty_dirs(vault / DIR_QUARANTINE / batch)
     _mark_manifest_undone(vault, batch, now, res)
     return res
