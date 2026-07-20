@@ -146,3 +146,28 @@ def test_apply_commits_each_entry_durably(scanned):
     with Database(vault / DIR_META / DB_FILENAME) as fresh:
         active = fresh.active_quarantine_sources()
     assert moved_sources <= active
+
+
+def test_apply_refuses_crafted_path_that_resolves_into_objects(scanned):
+    _, vault, _ = scanned
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        row = db.conn.execute(
+            """SELECT a.id, a.source_path, a.hash, a.size, o.object_path
+               FROM assets a JOIN objects o ON o.hash=a.hash
+               ORDER BY a.id LIMIT 1"""
+        ).fetchone()
+        obj = vault / row["object_path"]
+        before = hash_file(obj)
+        crafted = f"organized/../{row['object_path']}"
+        candidate = Q.QCandidate(
+            row["id"], row["source_path"], row["hash"], row["size"],
+            crafted, "duplicates",
+        )
+        plan = Q.QuarantinePlan(reason="duplicates", candidates=[candidate])
+
+        res = Q.apply(db, vault, plan)
+
+        assert res.moved == []
+        assert any("outside organized/" in reason for _, reason in res.skipped)
+        assert db.conn.execute("SELECT COUNT(*) FROM quarantine").fetchone()[0] == 0
+    assert obj.is_file() and hash_file(obj) == before

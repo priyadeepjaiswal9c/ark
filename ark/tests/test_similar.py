@@ -4,6 +4,7 @@ grouping (distinct content, not byte copies) and blurry-photo detection."""
 from pathlib import Path
 
 from ark import similar as similar_mod
+from ark.cli import main
 from ark.similar import SimilarImage, _pick_keeper
 from ark.constants import DIR_META, DB_FILENAME
 from ark.db import Database
@@ -86,3 +87,23 @@ def test_distance_threshold_is_respected(scanned):
         # by a couple of bits, so no near-dup group survives.
         strict = similar_mod.analyze_vault(db, vault, distance=0)
     assert strict.near_dup_groups == []
+
+
+def test_cli_similar_persists_missing_signal_backfill(scanned):
+    _, vault, _ = scanned
+    db_path = vault / DIR_META / DB_FILENAME
+    with Database(db_path) as db:
+        db.conn.execute("UPDATE assets SET phash=NULL, blur=NULL WHERE kind='image'")
+        db.commit()
+
+    assert main(["similar", "--vault", str(vault), "--json"]) == 0
+
+    with Database(db_path, read_only=True) as db:
+        represented = db.conn.execute(
+            "SELECT COUNT(DISTINCT hash) FROM assets WHERE kind='image' AND phash IS NOT NULL"
+        ).fetchone()[0]
+        distinct_images = db.conn.execute(
+            "SELECT COUNT(DISTINCT hash) FROM assets WHERE kind='image'"
+        ).fetchone()[0]
+    # Exact byte duplicates share a hash and need only one persisted signal.
+    assert represented == distinct_images

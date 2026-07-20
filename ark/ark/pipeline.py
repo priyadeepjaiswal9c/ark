@@ -24,7 +24,7 @@ from .constants import (
 )
 from .db import Database
 from .backup import VaultWriter
-from .mirror import Mirror
+from .mirror import Mirror, discover_vault_objects
 from .models import Asset
 from .rules import apply_rules
 
@@ -119,13 +119,18 @@ def run(
         for i, path in enumerate(ingest(source), 1):
             item = _process_one(path, cfg, db, writer, seen, dry_run, quarantined)
             _tally(stats, item)
-            if not dry_run and mirror.enabled and item.is_new_object and item.object_relpath:
-                _mirror_item(mirror, vault, item, stats)
             if progress:
                 progress(item)
             if not dry_run and i % 50 == 0:
                 db.commit()
         if not dry_run:
+            if mirror.enabled:
+                # Reconcile against the real tree, not only committed DB rows.
+                # This also catches an object made durable by a prior process
+                # that died before it could register metadata.
+                mst = mirror.sync(vault, discover_vault_objects(vault))
+                stats.mirrored += mst.replicated
+                stats.mirror_failed += mst.failed + mst.missing_source
             db.finish_run(run_id, stats.as_counts(), _now())
             db.set_meta("last_scan", _now())
             db.commit()
@@ -155,7 +160,10 @@ def _process_one(path: Path, cfg: Config, db: Database, writer: VaultWriter,
         # way: back the object up but don't recreate the organized/ link.
         is_quarantined = asset.source_path in quarantined
 
-        result = writer.store(asset, match, dry_run=dry_run, skip_organize=is_quarantined)
+        result = writer.store(
+            asset, match, dry_run=dry_run, skip_organize=is_quarantined,
+            existing_organized=existing["organized_path"] if existing else None,
+        )
 
         unchanged = healed = False
         wrote_bytes = result.action in ("stored", "healed")  # store actually copied bytes
@@ -212,16 +220,6 @@ def _process_one(path: Path, cfg: Config, db: Database, writer: VaultWriter,
     except Exception as e:  # noqa: BLE001 — resilience is the whole point here
         return ItemResult(str(path), "", STATUS_FAILED, "", None, False, 0,
                           error=f"{type(e).__name__}: {e}")
-
-
-def _mirror_item(mirror: Mirror, vault: Path, item: ItemResult, stats: RunStats) -> None:
-    """Replicate a freshly-stored object to the off-site mirror. Soft-fails: a
-    disconnected mirror is counted, never fatal — `ark mirror` catches up later."""
-    outcome = mirror.replicate_object(vault, item.object_relpath, item.hash)
-    if outcome in ("replicated", "present"):
-        stats.mirrored += 1
-    else:
-        stats.mirror_failed += 1
 
 
 def _tally(stats: RunStats, item: ItemResult) -> None:

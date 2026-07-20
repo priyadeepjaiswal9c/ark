@@ -90,7 +90,8 @@ def analyze_vault(db: Database, vault: str | Path,
     # redundancy: how many source files carry each content hash
     hash_counts = Counter(r["hash"] for r in rows)
     # near-duplicate redundant ids (reuse the P2 perceptual grouping)
-    sim = similar_mod.analyze_vault(db, vault, blur_threshold=blur_threshold, backfill=True)
+    sim = similar_mod.analyze_vault(
+        db, vault, blur_threshold=blur_threshold, backfill=True, persist=False)
     near_dup_ids = {m.id for g in sim.near_dup_groups for m in g.redundant}
 
     for r in rows:

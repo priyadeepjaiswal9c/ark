@@ -110,6 +110,39 @@ def test_cleanup_flags_corrupt_object_as_at_risk_not_safe(scanned):
     assert rep2.at_risk[0].problem == "vault object corrupt"
 
 
+def test_cleanup_reverifies_object_for_each_duplicate_source_row(scanned, monkeypatch):
+    """A good result for one duplicate row must not be cached for the next."""
+    _, vault, _ = scanned
+    with Database(vault / DIR_META / DB_FILENAME) as db:
+        duplicate = db.conn.execute(
+            """SELECT a.hash, o.object_path
+               FROM assets a JOIN objects o ON o.hash=a.hash
+               GROUP BY a.hash HAVING COUNT(*) > 1"""
+        ).fetchone()
+        target_hash = duplicate["hash"]
+        target_obj = vault / duplicate["object_path"]
+        real_verify = report._object_verifies
+        checks = 0
+
+        def verify_then_remove(vault_path, object_relpath, expected_hash):
+            nonlocal checks
+            result = real_verify(vault_path, object_relpath, expected_hash)
+            if expected_hash == target_hash:
+                checks += 1
+                if checks == 1:
+                    target_obj.unlink()
+            return result
+
+        monkeypatch.setattr(report, "_object_verifies", verify_then_remove)
+        rep = report.cleanup_report(db, vault)
+
+    safe = [c for c in rep.safe_to_delete if c.hash == target_hash]
+    risk = [a for a in rep.at_risk if a.hash == target_hash]
+    assert checks == 2
+    assert len(safe) == 1 and len(risk) == 1
+    assert risk[0].problem == "vault object missing"
+
+
 def test_rescan_is_idempotent(scanned):
     dump, vault, _ = scanned
     cfg = load_config(vault)

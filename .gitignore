@@ -3,6 +3,10 @@ ark/.venv/
 ark/demo-vault/
 ark/sample-dump/
 ark-vault/
+*.db
+objects/
+quarantine/
+*[Vv]ault*/
 *.pyc
 __pycache__/
 .pytest_cache/

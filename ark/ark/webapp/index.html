@@ -41,6 +41,11 @@
   .where { color:var(--dim); font-size:12px; }
   .banner { background:rgba(248,81,73,.12); color:var(--err); border:1px solid rgba(248,81,73,.3);
             padding:12px 14px; border-radius:10px; margin-bottom:14px; font-size:14px; display:none; }
+  .auth { display:flex; gap:8px; margin-bottom:14px; }
+  .auth input { min-width:0; flex:1; background:var(--card); color:var(--fg); border:1px solid var(--line);
+                border-radius:10px; padding:11px 12px; font:inherit; }
+  .auth button { background:var(--accent); color:white; border:0; border-radius:10px;
+                 padding:10px 14px; font-weight:600; }
   footer { position:fixed; bottom:0; left:0; right:0; text-align:center; padding:10px;
            color:var(--dim); font-size:12px; background:linear-gradient(transparent,var(--bg) 40%); }
 </style>
@@ -52,6 +57,11 @@
 </header>
 <main>
   <div class="banner" id="banner"></div>
+  <form class="auth" id="auth">
+    <input id="token" type="password" autocomplete="off" placeholder="Bearer token from ark serve"
+           aria-label="ARK bearer token" required>
+    <button type="submit">Connect</button>
+  </form>
   <div class="drop" id="drop">
     <strong>Back up your photos</strong>
     Pick photos or videos — each is copied into your vault, deduplicated and
@@ -67,20 +77,21 @@
 <footer>ARK · nothing here deletes anything</footer>
 <script>
 const $ = s => document.querySelector(s);
-// token: from ?t= on first open, then remembered so the installed app keeps working.
-const url = new URL(location.href);
-let token = url.searchParams.get('t');
-if (token) localStorage.setItem('ark_token', token);
-token = token || localStorage.getItem('ark_token') || '';
+// Kept only in this page's memory: never put bearer credentials in a URL or
+// persistent localStorage where history, screenshots, or other scripts expose it.
+let token = '';
 let sent = 0;
 
 function banner(msg){ const b=$('#banner'); b.textContent=msg; b.style.display='block'; }
+function clearBanner(){ $('#banner').style.display='none'; }
 
 async function refreshStatus(){
+  if(!token) return;
   try{
-    const r = await fetch('/status', {headers:{'X-ARK-Token':token}});
-    if(r.status===401){ banner('This link is missing its access token. Re-open the URL that `ark serve` printed.'); return; }
+    const r = await fetch('/status', {headers:{'Authorization':'Bearer '+token}});
+    if(r.status===401){ banner('Token rejected. Re-enter the bearer token that `ark serve` printed.'); return; }
     const s = await r.json();
+    clearBanner();
     $('#assets').textContent = s.assets; $('#objects').textContent = s.objects;
   }catch(e){ /* offline — ignore */ }
 }
@@ -108,10 +119,11 @@ function done(li, res){
 }
 
 async function upload(file){
+  if(!token){ banner('Enter the bearer token before uploading.'); return; }
   const li=row(file);
   try{
     const r=await fetch('/ingest',{method:'POST',
-      headers:{'X-ARK-Token':token,'X-Filename':file.name},
+      headers:{'Authorization':'Bearer '+token,'X-Filename':file.name},
       body:file});
     done(li, await r.json());
   }catch(e){ done(li,{ok:false,error:String(e)}); }
@@ -127,9 +139,14 @@ const drop=$('#drop');
 ['dragover','drop'].forEach(ev=>drop.addEventListener(ev,e=>e.preventDefault()));
 drop.addEventListener('drop', e=>[...e.dataTransfer.files].forEach(upload));
 
+$('#auth').addEventListener('submit', e=>{
+  e.preventDefault();
+  token=$('#token').value.trim();
+  if(token) refreshStatus();
+});
+
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
-if(!token) banner('Open the URL that `ark serve` printed (it carries your access token).');
-refreshStatus();
+banner('Enter the bearer token that `ark serve` printed. Use only on a trusted LAN; HTTP is not encrypted.');
 </script>
 </body>
 </html>

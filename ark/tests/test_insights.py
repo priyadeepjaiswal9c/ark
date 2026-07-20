@@ -71,3 +71,25 @@ def test_device_coverage_and_gap(scanned):
     # the sample has an Aug->Nov jump on the Samsung -> a multi-week gap is found
     assert sam.largest_gap_days >= I._GAP_ALERT_DAYS
     assert sam.first and sam.last and sam.first <= sam.last
+
+
+def test_insights_backfills_similarity_in_memory_without_persisting(scanned):
+    _, vault, _ = scanned
+    db_path = vault / DIR_META / DB_FILENAME
+    with Database(db_path) as db:
+        db.conn.execute("UPDATE assets SET phash=NULL, blur=NULL WHERE kind='image'")
+        db.commit()
+
+    with Database(db_path, read_only=True) as db:
+        rep = I.analyze_vault(db, vault)
+    edited = next(
+        k for k in rep.precious_single_copy
+        if Path(k.source_path).name == "IMG_20250704_183000_edited.jpg"
+    )
+    assert any("near-duplicate" in reason for reason in edited.reasons)
+
+    with Database(db_path, read_only=True) as db:
+        persisted = db.conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE phash IS NOT NULL OR blur IS NOT NULL"
+        ).fetchone()[0]
+    assert persisted == 0

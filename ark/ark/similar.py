@@ -85,13 +85,15 @@ def analyze_vault(
     distance: int = perceptual.DEFAULT_NEAR_DUP_DISTANCE,
     blur_threshold: float = perceptual.DEFAULT_BLUR_THRESHOLD,
     backfill: bool = True,
+    persist: bool = True,
 ) -> SimilarReport:
     """Group near-duplicate images and flag blurry ones.
 
     One representative per distinct content hash is used, so exact byte copies
     never masquerade as *near* duplicates. When ``backfill`` is set, images that
     lack a stored perceptual signal (e.g. ingested before P2) are computed on
-    the fly from their vault object and persisted.
+    the fly from their vault object. ``persist`` controls whether those newly
+    computed signals are committed to the database.
     """
     vault = Path(vault)
     rows = db.images_for_similarity()
@@ -107,7 +109,7 @@ def analyze_vault(
         )
 
     if backfill:
-        _backfill(db, vault, reps.values())
+        _backfill(db, vault, reps.values(), persist=persist)
 
     rep_list = list(reps.values())
     report = SimilarReport(
@@ -164,7 +166,7 @@ def _is_better_keep(a: SimilarImage, b: SimilarImage) -> bool:
     return a.blur > b.blur
 
 
-def _backfill(db: Database, vault: Path, images) -> None:
+def _backfill(db: Database, vault: Path, images, persist: bool = True) -> None:
     changed = False
     for im in images:
         if im.phash is not None:
@@ -177,9 +179,10 @@ def _backfill(db: Database, vault: Path, images) -> None:
         if phash is None and blur is None:
             continue
         im.phash, im.blur = phash, blur
-        db.set_perceptual(im.id, phash, blur)
-        changed = True
-    if changed:
+        if persist:
+            db.set_perceptual(im.id, phash, blur)
+            changed = True
+    if persist and changed:
         db.commit()
 
 

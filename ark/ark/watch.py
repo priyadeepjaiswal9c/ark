@@ -33,7 +33,9 @@ class WatchConfig:
     interval: float = 5.0        # seconds between mount-root polls
     debounce: float = 3.0        # settle time after a volume appears, before scanning
     mount_root: str = "/Volumes"
-    sources: tuple[str, ...] = ("*",)          # fnmatch patterns of volume names to ingest
+    # Explicit opt-in: mutable display names are not an identity boundary, so
+    # auto-ingest nothing until the user supplies exact/pinned volume patterns.
+    sources: tuple[str, ...] = ()               # fnmatch patterns of volume names to ingest
     ignore: tuple[str, ...] = (                 # never auto-ingest these (system volumes)
         "Macintosh HD", "Macintosh HD*", "Recovery", "Preboot", "VM", "Data",
         "com.apple.*", "Time Machine*", ".*",
@@ -82,8 +84,23 @@ def list_volumes(mount_root: str = "/Volumes") -> set[str]:
 # ---- the sweep + loop ------------------------------------------------------
 
 def _volume_path(wc: WatchConfig, name: str) -> Path:
-    p = Path(wc.mount_root) / name
-    return (p / wc.subpath) if wc.subpath else p
+    root = Path(wc.mount_root).resolve()
+    volume = (root / name).resolve()
+    try:
+        volume.relative_to(root)
+    except ValueError as e:
+        raise ValueError(f"volume path escapes mount root: {name}") from e
+    if not wc.subpath:
+        return volume
+    sub = Path(wc.subpath)
+    if sub.is_absolute() or ".." in sub.parts:
+        raise ValueError(f"watch subpath must be relative and contain no '..': {wc.subpath}")
+    target = (volume / sub).resolve()
+    try:
+        target.relative_to(volume)
+    except ValueError as e:
+        raise ValueError(f"watch subpath escapes volume: {wc.subpath}") from e
+    return target
 
 
 def sweep(
@@ -108,11 +125,15 @@ def sweep(
         current = list_fn(wc.mount_root)      # re-read: a flaky/brief mount drops out here
 
     for name in targets:
+        try:
+            vol_path = _volume_path(wc, name)
+        except ValueError as e:
+            events.append(ScanEvent(name, "", False, str(e)))
+            continue
         if name not in current:                       # confirmed unmounted by list_fn
-            events.append(ScanEvent(name, str(_volume_path(wc, name)), False,
+            events.append(ScanEvent(name, str(vol_path), False,
                                     "disappeared before it settled"))
             continue
-        vol_path = _volume_path(wc, name)
         # The volume is present (list_fn just reported it); only a configured
         # subpath needs a disk check — e.g. a card with no DCIM/ folder.
         if wc.subpath and not vol_path.exists():
@@ -120,10 +141,13 @@ def sweep(
             continue
         events.append(scan_fn(name, vol_path))
 
-    # everything currently mounted is now "seen"; drop volumes that went away so
-    # reconnecting the same SD card later triggers a fresh scan.
+    # Keep successful and previously-seen mounts. A failed/not-ready target is
+    # deliberately NOT marked seen, so the next sweep retries it while mounted.
+    successful = {e.volume for e in events if e.scanned}
+    attempted = set(targets)
+    next_seen = (seen & current) | (current - attempted) | successful
     seen.clear()
-    seen.update(current)
+    seen.update(next_seen)
     return events
 
 

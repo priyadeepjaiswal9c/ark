@@ -16,10 +16,15 @@ this class so that swap stays local.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+import fcntl
 
 from .models import Asset, GeoPlace
 
@@ -27,17 +32,52 @@ SCHEMA_VERSION = 2
 
 
 class Database:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, read_only: bool = False):
         self.path = str(path)
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        # Two ARK processes can share a vault (e.g. `ark watch` + a manual scan).
-        # WAL serializes writers; wait for the lock instead of failing instantly.
-        self.conn.execute("PRAGMA busy_timeout=5000")
-        self.fts = _fts5_available(self.conn)
-        self._migrate()
+        self.read_only = read_only
+        self.fts = False
+
+        if read_only:
+            if self.path == ":memory:":
+                self.conn = sqlite3.connect(self.path)
+            else:
+                uri = Path(self.path).expanduser().resolve().as_uri() + "?mode=ro"
+                self.conn = sqlite3.connect(uri, uri=True)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only=ON")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.fts = _fts_table_exists(self.conn)
+            return
+
+        # Schema setup is a write transaction spread across several statements.
+        # busy_timeout only waits statement-by-statement; it is not a migration
+        # mutex. Serialize the *whole* bootstrap across ARK processes so a first
+        # open cannot race another first open on WAL/DDL/FTS/meta changes.
+        with _migration_lock(self.path):
+            self.conn = sqlite3.connect(self.path, timeout=30.0)
+            self.conn.row_factory = sqlite3.Row
+            try:
+                self._bootstrap_with_retry()
+            except Exception:
+                self.conn.close()
+                raise
+
+    def _bootstrap_with_retry(self) -> None:
+        delays = (0.02, 0.05, 0.10, 0.20, 0.40)
+        for attempt in range(len(delays) + 1):
+            try:
+                # Two ARK processes can share a vault after bootstrap too (e.g.
+                # `ark watch` + a manual scan). WAL serializes normal writers.
+                self.conn.execute("PRAGMA busy_timeout=30000")
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA foreign_keys=ON")
+                self._migrate()
+                return
+            except sqlite3.OperationalError as e:
+                if not _is_busy(e) or attempt == len(delays):
+                    raise
+                self.conn.rollback()
+                time.sleep(delays[attempt])
 
     # ---- lifecycle --------------------------------------------------------
     def close(self) -> None:
@@ -133,7 +173,7 @@ class Database:
             """
         )
         self._ensure_columns()
-        if self.fts:
+        try:
             c.executescript(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(
@@ -141,6 +181,15 @@ class Database:
                 );
                 """
             )
+            self.fts = True
+        except sqlite3.OperationalError as e:
+            # Lack of the optional SQLite module is the only condition that
+            # means "FTS unavailable". A lock/busy error is retried by the
+            # serialized bootstrap and must never be silently misclassified.
+            if "no such module: fts5" in str(e).lower():
+                self.fts = False
+            else:
+                raise
         c.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
             (str(SCHEMA_VERSION),),
@@ -369,13 +418,37 @@ class Database:
 
 # ---- module helpers --------------------------------------------------------
 
-def _fts5_available(conn: sqlite3.Connection) -> bool:
+@contextmanager
+def _migration_lock(db_path: str):
+    """Cross-process lock covering every bootstrap schema write.
+
+    In-memory databases are private to one connection and need no lock. The
+    lockfile is deliberately persistent metadata; process death releases the
+    kernel lock without requiring risky cleanup.
+    """
+    if db_path == ":memory:":
+        yield
+        return
+    path = Path(db_path)
+    lock_path = path.with_name(f"{path.name}.migrate.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        conn.execute("CREATE VIRTUAL TABLE _fts_probe USING fts5(x)")
-        conn.execute("DROP TABLE _fts_probe")
-        return True
-    except sqlite3.OperationalError:
-        return False
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _is_busy(error: sqlite3.OperationalError) -> bool:
+    msg = str(error).lower()
+    return "locked" in msg or "busy" in msg
+
+
+def _fts_table_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets_fts'"
+    ).fetchone() is not None
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:

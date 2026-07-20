@@ -24,6 +24,8 @@ Three ways to select what to quarantine:
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,10 +157,17 @@ def apply(db: Database, vault: str | Path, plan: QuarantinePlan, dry_run: bool =
     now = _now()
 
     for c in plan.candidates:
-        inner = _strip_organized(c.original_relpath)
-        q_rel = f"{DIR_QUARANTINE}/{batch}/{inner}"
-        src_abs = _within(vault, c.original_relpath)
-        dst_abs = _within(vault, q_rel)
+        try:
+            # The only legal move source is an organized-view entry. Merely
+            # being somewhere under the vault is not enough: a stale/malicious
+            # DB path into objects/ must never move the canonical object.
+            src_abs = _within_organized(vault, c.original_relpath)
+            inner = str(src_abs.relative_to(vault / DIR_ORGANIZED))
+            q_rel = f"{DIR_QUARANTINE}/{batch}/{inner}"
+            dst_abs = _within(vault, q_rel)
+        except ValueError as e:
+            res.skipped.append((c.display, str(e)))
+            continue
         if dry_run:
             res.moved.append(c)
             continue
@@ -266,6 +275,19 @@ def _within(vault: Path, rel: str) -> Path:
     return p
 
 
+def _within_organized(vault: Path, rel: str) -> Path:
+    """Resolve a move source and prove it is specifically under organized/."""
+    if Path(rel).is_absolute() or not rel.startswith(DIR_ORGANIZED + "/"):
+        raise ValueError(f"refusing to quarantine non-organized path: {rel}")
+    organized = (vault / DIR_ORGANIZED).resolve()
+    p = (vault / rel).resolve()
+    try:
+        p.relative_to(organized)
+    except ValueError as e:
+        raise ValueError(f"refusing to quarantine path outside organized/: {rel}") from e
+    return p
+
+
 def _prune_empty_dirs(root: Path) -> None:
     if not root.exists():
         return
@@ -296,8 +318,7 @@ def _write_manifest(vault: Path, batch: str, reason: str, now: str, moved: list[
             for c in moved
         ],
     }
-    (_manifest_dir(vault) / f"{batch}.json").write_text(
-        json.dumps(payload, indent=2), encoding="utf-8")
+    _atomic_write_json(_manifest_dir(vault) / f"{batch}.json", payload)
 
 
 def _mark_manifest_undone(vault: Path, batch: str, now: str, res: UndoResult) -> None:
@@ -309,10 +330,33 @@ def _mark_manifest_undone(vault: Path, batch: str, now: str, res: UndoResult) ->
     data["undone_at"] = now
     data["restored"] = res.restored
     data["relocated"] = res.relocated
-    (_manifest_dir(vault) / f"{batch}.undone.json").write_text(
-        json.dumps(data, indent=2), encoding="utf-8")
+    _atomic_write_json(_manifest_dir(vault) / f"{batch}.undone.json", data)
     if mpath.exists():
         mpath.unlink()
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Durably replace a manifest; a crash never leaves partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex}-{path.name}"
+    try:
+        with open(tmp, "x", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        try:
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _now() -> str:

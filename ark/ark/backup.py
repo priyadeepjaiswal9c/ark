@@ -64,7 +64,8 @@ class VaultWriter:
 
     # ---- public API -------------------------------------------------------
     def store(self, asset: Asset, match: RuleMatch, dry_run: bool = False,
-              skip_organize: bool = False) -> StoreResult:
+              skip_organize: bool = False,
+              existing_organized: Optional[str] = None) -> StoreResult:
         """Back up ``asset`` into the vault. When ``skip_organize`` is set the
         object is still stored/verified but no ``organized/`` link is created —
         used on rescan for assets whose organized entry is in quarantine, so a
@@ -79,7 +80,23 @@ class VaultWriter:
         self._assert_within(self.organized, dest_dir)
         filename = self._safe_filename(Path(asset.source_path).name, asset.ext, h)
         logical_path = f"{match.dest_relpath}/{filename}"
-        organized_abs = self._resolve_collision(dest_dir, filename, h, dry_run)
+        organized_abs: Optional[Path] = None
+        if existing_organized:
+            # A rescan may reuse *this source's* existing organized entry. A new
+            # duplicate source must never reuse a sibling's path: otherwise
+            # quarantining one DB row moves the one shared link out from under
+            # every sibling that points at it.
+            preferred = (self.vault / existing_organized).resolve()
+            self._assert_within(self.organized, preferred)
+            try:
+                if (not preferred.exists() and not preferred.is_symlink()) or (
+                    preferred.is_file() and hash_file(preferred) == h
+                ):
+                    organized_abs = preferred
+            except OSError:
+                pass
+        if organized_abs is None:
+            organized_abs = self._resolve_collision(dest_dir, filename)
         organized_rel = str(organized_abs.relative_to(self.vault))
 
         if dry_run:
@@ -277,11 +294,13 @@ class VaultWriter:
             while chunk := fs.read(1 << 20):
                 fd.write(chunk)
 
-    def _resolve_collision(self, dest_dir: Path, filename: str, h: str, dry_run: bool) -> Path:
+    def _resolve_collision(self, dest_dir: Path, filename: str) -> Path:
         """Return a path in dest_dir that doesn't clobber a *different* file.
 
-        If an existing file at the name is a link to the same object (same hash),
-        reuse it (idempotent). Otherwise pick name, name (2), name (3), ...
+        Always give a newly-seen source its own organized entry. Idempotent
+        rescans reuse ``existing_organized`` in ``store``; content equality
+        alone is insufficient because multiple source rows need independent
+        links for consistent quarantine/undo behavior.
         """
         stem, dot, ext = filename.partition(".")
         candidate = dest_dir / filename
@@ -289,12 +308,6 @@ class VaultWriter:
         while True:
             if not candidate.exists() and not candidate.is_symlink():
                 return candidate
-            # same content already linked here? reuse.
-            try:
-                if candidate.is_file() and hash_file(candidate) == h:
-                    return candidate
-            except OSError:
-                pass
             n += 1
             candidate = dest_dir / (f"{stem} ({n}){dot}{ext}" if dot else f"{stem} ({n})")
 

@@ -80,16 +80,15 @@ def cleanup_report(db: Database, vault: str | Path) -> CleanupReport:
     ).fetchall()
 
     hash_counts = Counter(r["hash"] for r in rows)   # >1 == content duplicated across sources
-    object_ok: dict[str, bool] = {}
     dup_seen: set[str] = set()
 
     for r in rows:
         h, src, size, objrel = r["hash"], r["source_path"], r["size"], r["object_path"]
 
         # (2) is the backup object itself intact?
-        if h not in object_ok:
-            object_ok[h] = _object_verifies(vault, objrel, h)
-        if not object_ok[h]:
+        # Verify for this source row. Never cache a True across duplicate rows:
+        # the object may be corrupted or disappear midway through a long report.
+        if not _object_verifies(vault, objrel, h):
             problem = ("vault object missing" if not (vault / objrel).exists()
                        else "vault object corrupt")
             rep.at_risk.append(AtRisk(src, h, size, problem))
@@ -98,6 +97,19 @@ def cleanup_report(db: Database, vault: str | Path) -> CleanupReport:
         # (3) do the source's CURRENT bytes match what's backed up?
         state = _source_state(src, h)
         if state == "match":
+            # Re-hash once more immediately before emitting the safety verdict.
+            # This closes the long gap in which a mutable phone/source file
+            # could change after its earlier proof but before classification.
+            final_state = _source_state(src, h)
+            if final_state != "match":
+                if final_state == "changed":
+                    rep.at_risk.append(AtRisk(
+                        src, h, size, "source changed during cleanup verification — re-scan before deleting"))
+                elif final_state == "unreadable":
+                    rep.unverifiable.append(AtRisk(src, h, size, "source became unreadable during verification"))
+                # Missing during proof means there is no longer anything at the
+                # source path to classify as safely clearable.
+                continue
             is_dup = hash_counts[h] > 1
             rep.safe_to_delete.append(CleanupCandidate(
                 source_path=src, hash=h, size=size,

@@ -11,7 +11,7 @@ Commands:
   ark quarantine ACTION [BATCH] [--dry-run]       reversibly declutter (near-duplicates/blurry/…) + undo
   ark rules   [--vault DIR] [--validate]          show/validate organization rules
   ark verify  [--vault DIR]                        re-hash every object (integrity)
-  ark mirror  [--vault DIR] [--verify]             replicate the store to the off-site [backup] target
+  ark mirror  [--vault DIR] [--init|--verify]      initialize/replicate/verify the off-site mirror
   ark watch   [--vault DIR] [--once] [--dry-run]   auto-ingest volumes as they connect
   ark serve   [--vault DIR] [--host H] [--port N]  phone sync receiver + web companion app
 """
@@ -38,7 +38,7 @@ from . import (
     similar as similar_mod, quarantine as quarantine_mod, watch as watch_mod,
     insights as insights_mod,
 )
-from .mirror import Mirror
+from .mirror import Mirror, discover_vault_objects
 
 
 def _vault_arg(p: argparse.ArgumentParser) -> None:
@@ -106,7 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pm = sub.add_parser("mirror", help="replicate the object store to the off-site [backup] target")
     _vault_arg(pm)
-    pm.add_argument("--verify", action="store_true", help="check the mirror instead of syncing to it")
+    mmode = pm.add_mutually_exclusive_group()
+    mmode.add_argument("--init", action="store_true",
+                       help="explicitly initialize the connected mirror target")
+    mmode.add_argument("--verify", action="store_true",
+                       help="check the mirror instead of syncing to it")
 
     pw = sub.add_parser("watch", help="auto-ingest volumes as they connect (non-destructive)")
     _vault_arg(pw)
@@ -356,7 +360,8 @@ def cmd_similar(args: argparse.Namespace) -> int:
     distance = args.distance if args.distance is not None else cfg.near_dup_distance
     blur_threshold = args.blur_threshold if args.blur_threshold is not None else cfg.blur_threshold
     with Database(vault / DIR_META / DB_FILENAME) as db:
-        rep = similar_mod.analyze_vault(db, vault, distance=distance, blur_threshold=blur_threshold)
+        rep = similar_mod.analyze_vault(
+            db, vault, distance=distance, blur_threshold=blur_threshold)
 
     if args.json:
         print(json.dumps({
@@ -396,7 +401,7 @@ def cmd_similar(args: argparse.Namespace) -> int:
     else:
         print("\n  blurry photos: none")
     print("\n" + rep.summary())
-    print("Nothing was changed. To reversibly declutter (with full undo):")
+    print("No files were moved or deleted. To reversibly declutter (with full undo):")
     print("  ark quarantine near-duplicates      ark quarantine blurry")
     return 0
 
@@ -406,7 +411,7 @@ def cmd_insights(args: argparse.Namespace) -> int:
     if not _vault_ready(vault):
         _err(f"no vault at {vault}")
         return 1
-    with Database(vault / DIR_META / DB_FILENAME) as db:
+    with Database(vault / DIR_META / DB_FILENAME, read_only=True) as db:
         rep = insights_mod.analyze_vault(db, vault)
 
     if args.json:
@@ -572,6 +577,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     problems = VaultWriter(vault, cfg).verify_vault()
     if args.json:
         print(json.dumps({"ok": not problems, "problems": problems}, indent=2))
+        return 1 if problems else 0
     elif problems:
         _err(f"✗ integrity check FAILED — {len(problems)} problem(s):")
         for p in problems:
@@ -602,14 +608,28 @@ def cmd_mirror(args: argparse.Namespace) -> int:
             print(msg)
         return 0
 
+    if getattr(args, "init", False):
+        problem = mirror.initialize(vault)
+        if args.json:
+            print(json.dumps({"target": str(mirror.root), "initialized": not problem,
+                              "problem": problem}, indent=2))
+        elif problem:
+            _err(f"could not initialize mirror at {mirror.root}: {problem}")
+        else:
+            print(f"✓ mirror target initialized at {mirror.root}")
+            print("  Run `ark mirror` to replicate the vault objects.")
+        return 1 if problem else 0
+
     with Database(vault / DIR_META / DB_FILENAME) as db:
-        objs = [(r["object_path"], r["hash"]) for r in db.objects_for_verify()]
+        db_objs = [(r["object_path"], r["hash"]) for r in db.objects_for_verify()]
+    objs = discover_vault_objects(vault, db_objs)
 
     if args.verify:
         problems = mirror.verify(objs)
         if args.json:
             print(json.dumps({"target": str(mirror.root), "objects": len(objs),
                               "ok": not problems, "problems": problems}, indent=2))
+            return 1 if problems else 0
         elif problems:
             _err(f"✗ mirror check FAILED — {len(problems)} problem(s) at {mirror.root}:")
             for p in problems[:50]:
@@ -625,7 +645,7 @@ def cmd_mirror(args: argparse.Namespace) -> int:
         print(json.dumps({"target": str(mirror.root), "replicated": st.replicated,
                           "already_present": st.already_present, "failed": st.failed,
                           "missing_source": st.missing_source, "problems": st.problems}, indent=2))
-        return 0
+        return 1 if st.problems else 0
     print(f"🪞  mirror → {mirror.root}")
     print(f"    {st.replicated} newly replicated · {st.already_present} already present · "
           f"{st.failed} failed")
@@ -653,13 +673,21 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return 1
     port = server.server_address[1]
     shown_host = serve_mod.lan_ip() if args.host in ("0.0.0.0", "") else args.host
-    url = f"http://{shown_host}:{port}/?t={server.token}"
-    print("📡  ARK sync server — the web companion for your phone")
-    print(f"    vault : {vault}")
-    print(f"    open on your phone (same Wi-Fi):  {url}")
-    if args.host in ("127.0.0.1", "localhost"):
-        print("    (bound to localhost; add --host 0.0.0.0 to reach it from your phone)")
-    print("    uploads are ingested non-destructively; Ctrl-C to stop.\n")
+    url = f"http://{shown_host}:{port}/"
+    warning = "TRUSTED LAN ONLY: plain HTTP, no TLS; network observers can capture the bearer token."
+    if args.json:
+        print(json.dumps({"url": url, "token": server.token, "vault": str(vault),
+                          "warning": warning if args.host in ("0.0.0.0", "") else ""}), flush=True)
+    else:
+        print("📡  ARK sync server — the web companion for your phone")
+        print(f"    vault : {vault}")
+        print(f"    open on your phone (same Wi-Fi):  {url}")
+        print(f"    enter this token in the page:     {server.token}")
+        if args.host in ("0.0.0.0", ""):
+            print(f"    ⚠ {warning}")
+        elif args.host in ("127.0.0.1", "localhost"):
+            print("    (bound to localhost; add --host 0.0.0.0 only on a trusted LAN)")
+        print("    uploads are ingested non-destructively; Ctrl-C to stop.\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -677,6 +705,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 1
     cfg = load_config(vault)
     wc = cfg.watch
+    if not wc.enabled:
+        msg = "watch is disabled by [watch] enabled=false in the vault config"
+        if args.json:
+            print(json.dumps({"enabled": False, "message": msg}))
+        else:
+            print(msg)
+        return 0
     overrides = {}
     if args.interval is not None:
         overrides["interval"] = args.interval
@@ -692,7 +727,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
             detail = (f"{c['stored']} new · {c['duplicates']} dup · "
                       f"{c['unchanged']} unchanged · {c['failed']} failed"
                       f"{'  (dry-run)' if args.dry_run else ''}")
-            return watch_mod.ScanEvent(name, str(vol_path), True, detail)
+            # Any failed file keeps the volume retryable on the next sweep.
+            return watch_mod.ScanEvent(name, str(vol_path), c["failed"] == 0, detail)
         except Exception as e:  # a bad volume must never kill the watcher
             return watch_mod.ScanEvent(name, str(vol_path), False, f"scan error: {e}")
 

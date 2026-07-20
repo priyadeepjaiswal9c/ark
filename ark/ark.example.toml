@@ -6,7 +6,8 @@ kind = "local"   # local | external | nas | cloud
 # An OFF-SITE MIRROR target. Leave it equal to the vault for no mirror. Point it
 # at an external SSD / NAS mount (kind = external|nas) and every object is also
 # replicated there (atomic + hash-verified) so your vault survives losing either
-# disk — scans mirror new objects automatically; `ark mirror` catches up / repairs.
+# disk. After setting the path, connect it and run `ark mirror --init` once;
+# scans then mirror new objects automatically and `ark mirror` catches up/repairs.
 # (The vault's own location is set with --vault or $ARK_VAULT, not here.)
 path = '~/ARK-vault'
 

@@ -54,11 +54,11 @@ $PY -m ark verify                    # re-hash every object (integrity)
 | `ark scan SRC [--dry-run]` | Ingest a dump: extract metadata, geocode, dedup, organize by rules, back up. `--dry-run` previews with **zero writes**. |
 | `ark search QUERY` | Natural-language-ish search: free text + filters (`kind:`, `place:`, `year:`, `camera:`). |
 | `ark cleanup` | The safe-to-delete-from-phone report — duplicates proven already in the vault. Suggests, never deletes. |
-| `ark similar [--distance N] [--blur-threshold X]` | Find **near-duplicate** photos (visually the same shot, different bytes) and **blurry** ones. Read-only; suggests a keeper per group. |
+| `ark similar [--distance N] [--blur-threshold X]` | Find **near-duplicate** photos (visually the same shot, different bytes) and **blurry** ones. It never moves/deletes files; older vaults may have missing perceptual signals computed and persisted during the scan. |
 | `ark insights` | Reasoning layer: a transparent **keep-score** (precious/normal/junk, every point justified), **missing-backup** (precious single-copy items to mirror), and **per-device** coverage + capture gaps. Read-only. |
-| `ark watch [--once] [--dry-run]` | **Auto-ingest on connect** — scans a volume the moment it mounts (`/Volumes`), matched against a config allowlist. Non-destructive; a reconnected card is re-scanned (dedup makes it cheap). |
-| `ark mirror [--verify]` | Replicate the object store to the `[backup]` target (an external SSD / NAS), atomically + hash-verified, so your vault survives losing either disk. Set `[backup] path` to somewhere other than the vault to enable; scans then mirror new objects automatically. |
-| `ark serve [--host H] [--port N]` | **Phone companion.** Runs a tiny sync receiver + an installable web app (PWA) — open the printed URL on your phone (same Wi-Fi), pick photos, and they upload straight into the vault (non-destructive, deduped, organized). Token-authed. Works on Android and iOS via the browser — no app store. |
+| `ark watch [--once] [--interval SEC] [--mount-root DIR] [--dry-run]` | **Auto-ingest on connect** — scans a volume the moment it mounts, matched against a config allowlist. `--interval` overrides the polling period; `--mount-root` overrides the configured mount directory (normally `/Volumes`). Non-destructive; a reconnected card is re-scanned (dedup makes it cheap). |
+| `ark mirror [--init\|--verify]` | Replicate the object store to the `[backup]` target (an external SSD / NAS), atomically + hash-verified. After configuring a new target, connect it and run `ark mirror --init` once; normal scans and `ark mirror` then sync, while `--verify` only checks it. |
+| `ark serve [--host H] [--port N] [--token TOKEN] [--json]` | **Phone companion.** Runs a tiny sync receiver + installable PWA. `--token` supplies the bearer token instead of generating one; `--json` emits startup details as JSON. Uploads are non-destructive, deduped, and organized. |
 | `ark quarantine {near-duplicates,blurry,duplicates,list,undo}` | Reversibly move redundant/blurry **organized-view links** into `quarantine/` with an undo manifest. Objects and sources are never touched; `undo` restores everything. `--dry-run` previews. |
 | `ark status` | Vault stats: assets, distinct objects, bytes saved by dedup, per-kind. |
 | `ark rules [--validate]` | Show / validate the organization rules. |
@@ -85,6 +85,33 @@ $PY -m ark verify                    # re-hash every object (integrity)
   the source is left untouched.
 - **Versioned.** When the file at a logical path changes, the new content becomes
   a new object and a new row in `versions`; the old content is never overwritten.
+
+## Mirror initialization and mount safety
+
+Set `[backup] path` to a directory on a connected external SSD or NAS, then run:
+
+```bash
+$PY -m ark mirror --init
+$PY -m ark mirror
+$PY -m ark mirror --verify
+```
+
+Initialization is an explicit, one-time bootstrap. ARK refuses a target that is
+the vault, overlaps it, resolves through an unsafe symlink, or is on the same
+device. It writes a vault-bound marker only after those checks pass. Every later
+mirror write requires that marker, so an absent drive/NAS cannot silently turn
+its stale mountpoint into a local directory and be reported as redundant storage.
+
+## Phone receiver security
+
+`ark serve` binds to `127.0.0.1` by default. The web app sends the shared token
+in an `Authorization: Bearer ...` header; it is not placed in the URL. Use
+`--token TOKEN` to choose it yourself, and `--json` when a launcher needs the
+startup URL/token as machine-readable output.
+
+> **Warning:** `ark serve --host 0.0.0.0` is for a **trusted LAN only**. The
+> built-in server uses plain HTTP and provides no TLS, so anyone able to observe
+> that network traffic can capture the bearer token and uploaded data.
 
 ## The metadata model (parametric)
 
@@ -124,7 +151,10 @@ only** (no numpy/OpenCV/ML weights) and stored in the DB:
 - a **blur score** — the variance of the Laplacian; low means out-of-focus.
 
 `ark similar` reports near-duplicate groups (suggesting which copy to keep — the
-sharpest, ties broken by file size) and blurry photos. It's read-only.
+sharpest, ties broken by file size) and blurry photos. It never moves or deletes
+files; if an older vault lacks perceptual signals, the scan persists that derived
+metadata so later scans do not have to recompute it. `ark insights` remains fully
+read-only and computes any missing signals only in memory.
 
 `ark quarantine {near-duplicates,blurry,duplicates}` acts on those findings
 **reversibly**: it `os.rename`s the redundant/blurry entry's `organized/`

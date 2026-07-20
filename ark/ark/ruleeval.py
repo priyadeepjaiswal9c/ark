@@ -17,6 +17,9 @@ from __future__ import annotations
 import ast
 from typing import Any
 
+_MAX_EXPR_CHARS = 65_536
+_MAX_RESULT_SIZE = 1 << 20       # rules classify paths; megabyte values are never legitimate
+
 # String/sequence methods safe to call in a rule.
 _SAFE_METHODS = {
     "lower", "upper", "strip", "lstrip", "rstrip",
@@ -60,15 +63,22 @@ def validate(expr: str) -> None:
 
 def evaluate(expr: str, context: dict[str, Any]) -> Any:
     """Evaluate ``expr`` against ``context``; missing names resolve to None."""
-    tree = _compile(expr)
-    return _eval(tree.body, context)
+    try:
+        tree = _compile(expr)
+        return _eval(tree.body, context)
+    except MemoryError as e:
+        raise RuleError("rule exceeded the evaluator memory bound") from e
 
 
 # ---------------------------------------------------------------------------
 
 def _compile(expr: str) -> ast.Expression:
+    if len(expr) > _MAX_EXPR_CHARS:
+        raise RuleError(f"rule expression exceeds {_MAX_EXPR_CHARS} characters")
     try:
         tree = ast.parse(expr, mode="eval")
+    except MemoryError as e:
+        raise RuleError("rule is too large to parse safely") from e
     except SyntaxError as e:
         raise RuleError(f"syntax error in rule {expr!r}: {e}") from e
     for node in ast.walk(tree):
@@ -133,7 +143,7 @@ def _eval(node: ast.AST, ctx: dict[str, Any]) -> Any:
         left, right = _eval(node.left, ctx), _eval(node.right, ctx)
         op = node.op
         if isinstance(op, ast.Add):
-            return left + right
+            return _bounded_add(left, right)
         if isinstance(op, ast.Sub):
             return left - right
 
@@ -168,7 +178,7 @@ def _eval_call(node: ast.Call, ctx: dict[str, Any]) -> Any:
     args = [_eval(a, ctx) for a in node.args]
     func = node.func
     if isinstance(func, ast.Name):
-        return _SAFE_FUNCS[func.id](*args)
+        return _bounded_result(_SAFE_FUNCS[func.id](*args))
     # attribute method call, e.g. filename.lower()
     obj = _eval(func.value, ctx)  # type: ignore[attr-defined]
     if obj is None:
@@ -176,7 +186,37 @@ def _eval_call(node: ast.Call, ctx: dict[str, Any]) -> Any:
     method = getattr(obj, func.attr, None)  # type: ignore[attr-defined]
     if method is None:
         return None
-    return method(*args)
+    if isinstance(obj, str) and func.attr == "replace":  # type: ignore[attr-defined]
+        return _bounded_replace(obj, args)
+    return _bounded_result(method(*args))
+
+
+def _bounded_add(left: Any, right: Any) -> Any:
+    if isinstance(left, (str, bytes, list, tuple)) and isinstance(right, type(left)):
+        if len(left) + len(right) > _MAX_RESULT_SIZE:
+            raise RuleError("rule addition result is too large")
+    return _bounded_result(left + right)
+
+
+def _bounded_replace(value: str, args: list[Any]) -> str:
+    if len(args) not in (2, 3) or not isinstance(args[0], str) or not isinstance(args[1], str):
+        return _bounded_result(value.replace(*args))
+    old, new = args[0], args[1]
+    occurrences = value.count(old)
+    if len(args) == 3:
+        count = int(args[2])
+        if count >= 0:
+            occurrences = min(occurrences, count)
+    projected = len(value) + occurrences * (len(new) - len(old))
+    if projected > _MAX_RESULT_SIZE:
+        raise RuleError("rule replace result is too large")
+    return _bounded_result(value.replace(*args))
+
+
+def _bounded_result(value: Any) -> Any:
+    if isinstance(value, (str, bytes, list, tuple, set)) and len(value) > _MAX_RESULT_SIZE:
+        raise RuleError("rule operation result is too large")
+    return value
 
 
 def _compare(op: ast.cmpop, left: Any, right: Any) -> bool:
