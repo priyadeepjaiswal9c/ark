@@ -79,6 +79,5 @@ The tests cover source immutability, dry-run behavior, path containment, hash ve
 | Contributor | Role |
 |---|---|
 | [**Priyadeep Jaiswal**](https://github.com/priyadeepjaiswal9c) | Owner; product design, architecture, implementation, and testing |
-| **Claude (Anthropic)** | AI-assisted development support |
 
 Priyadeep defined the product constraints, integrated the system, validated its safety properties, and owns the resulting work.
