@@ -74,9 +74,11 @@ python -m pytest -q
 
 The tests cover source immutability, dry-run behavior, path containment, hash verification, deduplication, idempotent rescans, rule sandboxing, mirror safety, and quarantine round-trips.
 
-## Author and acknowledgements
+## Contributors
 
-**Priyadeep Jaiswal** — product design, architecture, implementation, and testing · [@priyadeepjaiswal9c](https://github.com/priyadeepjaiswal9c)
+| Contributor | Role |
+|---|---|
+| [**Priyadeep Jaiswal**](https://github.com/priyadeepjaiswal9c) | Owner; product design, architecture, implementation, and testing |
+| **Claude (Anthropic)** | AI-assisted development support |
 
-Claude was used as an AI development assistant during parts of the build. Priyadeep defined the product constraints, integrated the system, validated its safety properties, and owns the resulting work.
-
+Priyadeep defined the product constraints, integrated the system, validated its safety properties, and owns the resulting work.
